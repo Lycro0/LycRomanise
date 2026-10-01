@@ -1,0 +1,1499 @@
+"""Spoti-Lyrics Overlay — a small always-on-top synced-lyrics strip for Spotify,
+with romanization for lyrics in many scripts.
+
+Run: double-click LyricsOverlay.pyw - no console window.
+`python app.py` also works: it relaunches itself without a console and exits.
+Quit from the tray icon.
+See README.md for one-time Spotify app setup.
+"""
+
+import applog
+
+applog.setup()   # first thing: file logging + crash capture (nothing goes to a console)
+
+import logging
+import os
+import queue
+import sys
+import threading
+import time
+import tkinter as tk
+import tkinter.font as tkfont
+
+import config
+import layout
+import tray
+import winsys
+from drawing import (_draw_outline_only, _draw_outlined_text, _ease_out_cubic,
+                     _lerp_rgb, _rgb_to_hex)
+from lyrics_provider import fetch_lyrics
+from romanize import detect_script, needs_romanization, romanize_line
+from spotify_client import SpotifyClient
+from textnorm import line_language, normalize
+
+log = logging.getLogger("spoti.app")
+
+APP_NAME = "Spoti-Lyrics Overlay"
+
+# --- polling ---------------------------------------------------------------
+# Spotify rate-limits per app, so the base rate stays gentle; sub-second
+# accuracy comes from interpolating the position between polls, not from
+# polling harder. Polling speeds up only where it pays off: for a few seconds
+# after a song changes (to lock the position in) and as a song is about to end
+# (to spot the next one right away).
+POLL_INTERVAL_MS = 1000        # playing or paused (quicker skip detection)
+POLL_INTERVAL_IDLE_MS = 2000   # Spotify reports nothing at all
+FAST_POLL_MS = 500
+FAST_POLL_AFTER_CHANGE_S = 8.0
+END_OF_TRACK_WINDOW_S = 8.0
+RESULT_DRAIN_MS = 20          # how often the UI thread picks up finished background work
+# A new poll only *nudges* the interpolated position by this fraction of the
+# disagreement (Spotify's progress_ms is jittery), unless the gap is big
+# enough to be a real seek, in which case it snaps.
+POLL_CORRECTION_GAIN = 0.35
+POLL_SEEK_THRESHOLD_S = 1.0
+LINE_TICK_MS = 30              # how often the current line is re-checked, independent of polling
+DESKTOP_TICK_MS = 20           # redraw rate for the strip
+LINE_ANIM_SECONDS = 0.28       # slide transition between lines
+
+TITLE_CARD_MAX_S = 8.0         # the "Artist - Song" card never shows longer than this
+NO_LYRICS_NOTICE_S = 6.0
+
+# --- desktop strip defaults (config.DEFAULT_APPEARANCE / appearance.json override) ---
+DESKTOP_BG = "#000000"
+DESKTOP_NEXT_RGB = (255, 225, 77)
+DESKTOP_WIDTH = 720
+DESKTOP_HEIGHT = 150
+DESKTOP_CURR_SIZE = 26
+DESKTOP_NEXT_SIZE = 17
+DESKTOP_CURR_MIN_SIZE = 13
+DESKTOP_NEXT_MIN_SIZE = 11
+DESKTOP_TEXT_MARGIN = 40     # side margin (both sides combined) text must fit within
+DESKTOP_MAX_LINES = 2        # last-resort wrap of the top line (long lines are normally split first)
+OUTLINE_SIZE = 1.5
+SPAWN_Y_PERCENT = 18
+MAX_LINE_CHARS = 0
+SHOW_TITLE_CARD = False
+
+# Karaoke fill: the current line starts yellow (not-yet-sung) and turns pink
+# left to right as playback reaches it, blended across a band scaled to the
+# line's own average character width so it sweeps instead of snapping.
+KARAOKE_UNSUNG_RGB = (255, 225, 77)
+KARAOKE_SUNG_RGB = (255, 61, 154)
+KARAOKE_GRADIENT_MIN_PX = 20
+KARAOKE_GRADIENT_CHAR_SPAN = 2.2
+LYRIC_OFFSET_S = 0.0   # +ve = lyrics run earlier; set via Settings / appearance.json
+
+# Sources without per-word timing only give each line's *start*; assuming it
+# finishes when the next line starts makes the fill crawl through pauses, so
+# the fill is capped to a plausible sung pace for the line's length.
+KARAOKE_CHARS_PER_SECOND = 6.0
+KARAOKE_MIN_FILL_SECONDS = 0.6
+
+LOCK_ICON_BG = "#1a1a1a"
+LOCK_ICON_FG = "#b8b8b8"
+LOCK_ICON_SIZE = (22, 22)
+HOVER_BORDER_RGB = "#2c2c2c"   # faint frame, only while the pointer is over an unlocked strip
+HOVER_HIDE_DELAY_S = 0.6       # chrome lingers briefly so the pointer can reach the lock icon
+NOTICE_ERROR_FG = "#ff8a8a"
+NOTICE_INFO_FG = "#cfcfcf"
+APPEARANCE_WATCH_MS = 250
+UI_CALL_DRAIN_MS = 20
+REDRAW_KEEPALIVE_S = 0.5       # Windows full-repaint at most this often unless the scene changed
+
+def _load_appearance():
+    """Pull appearance.json (if any) in over the defaults above. A bad or
+    missing file can never stop the app from starting."""
+    try:
+        s = config.load_appearance()
+    except Exception as exc:
+        log.warning("failed to load appearance settings, using defaults: %s", exc)
+        return
+
+    global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
+    global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
+    global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
+    global MAX_LINE_CHARS, SHOW_TITLE_CARD
+
+    def num(key, cast, default):
+        try:
+            return cast(s.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    DESKTOP_BG = s.get("desktop_bg", DESKTOP_BG)
+    DESKTOP_NEXT_RGB = tuple(s.get("next_line_rgb", DESKTOP_NEXT_RGB))
+    DESKTOP_WIDTH = num("desktop_width", int, DESKTOP_WIDTH)
+    DESKTOP_HEIGHT = num("desktop_height", int, DESKTOP_HEIGHT)
+    DESKTOP_CURR_SIZE = num("curr_font_size", int, DESKTOP_CURR_SIZE)
+    DESKTOP_NEXT_SIZE = num("next_font_size", int, DESKTOP_NEXT_SIZE)
+    DESKTOP_CURR_MIN_SIZE = num("curr_font_min_size", int, DESKTOP_CURR_MIN_SIZE)
+    DESKTOP_NEXT_MIN_SIZE = num("next_font_min_size", int, DESKTOP_NEXT_MIN_SIZE)
+    KARAOKE_UNSUNG_RGB = tuple(s.get("karaoke_unsung_rgb", KARAOKE_UNSUNG_RGB))
+    KARAOKE_SUNG_RGB = tuple(s.get("karaoke_sung_rgb", KARAOKE_SUNG_RGB))
+    LYRIC_OFFSET_S = num("lyric_offset_ms", float, 0.0) / 1000.0
+    OUTLINE_SIZE = max(0.0, min(4.0, num("outline_size", float, OUTLINE_SIZE)))
+    SPAWN_Y_PERCENT = max(0, min(90, num("spawn_y_percent", float, SPAWN_Y_PERCENT)))
+    MAX_LINE_CHARS = max(0, num("max_line_chars", int, 0))
+    SHOW_TITLE_CARD = bool(s.get("show_title_card", False))
+
+_load_appearance()
+
+class LyricsApp:
+    LAST_LINE_ASSUMED_SPAN = 4.0  # seconds — used only when there's no next line to time against
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title(APP_NAME)
+        applog.install_tk_handler(root)
+        self.scale = self._detect_scale()   # 1.0 at 100% display scaling, 1.5 at 150%, ...
+
+        # --- current track / lyrics state
+        self.current_track_id = None
+        self.track = None
+        self.title_text = ""
+        self.duration_s = 0.0
+        self.lyrics_state = "none"     # none | pending | ready | missing
+        self.lyrics = []               # [(timestamp_s, raw_text)]
+        self.line_words = None         # per-line [(start, end, text)] when the source had word timing
+        self.norm_lines = []           # lyrics with numbers/symbols spelled out
+        self.norm_tokens = None
+        self.song_hint = None          # 'ko' | 'ja' | 'zh' | ... for the song as a whole
+        self.segments = []             # displayed lines (long lyric lines are split into several)
+        self.seg_starts = []
+        self.line_infos = []
+        self.current_index = -1        # index into self.segments
+
+        # --- desktop strip state
+        self.desktop_mode = False
+        self.desktop_curr_size = DESKTOP_CURR_SIZE
+        self.desktop_next_size = DESKTOP_NEXT_SIZE
+        self._drag_offset = (0, 0)
+        self.desktop_locked = False
+        self.lock_window = None
+        self.lock_icon_label = None
+        self._lock_icon_visible = None
+        self.desktop_canvas = None
+        self._anim_start_perf = None
+
+        # --- playback timing (interpolated between polls)
+        self._last_position_s = 0.0
+        self._last_poll_perf = time.perf_counter()
+        self._is_playing = False
+        self._fast_poll_until = 0.0
+        self._results = queue.Queue()
+        self._ui_calls = queue.Queue()   # callables posted from other threads (tray) to run on the Tk thread
+        self._notice = None              # {"text", "kind", "until"} shown on the strip
+        self._hover_since = 0.0
+        self._hover_last = None
+        self._show_border = False
+        self._last_scene_sig = None
+        self._last_full_redraw = 0.0
+        self._settings_window = None
+        self._login_window = None
+        self._login_thread = None        # the browser login (blocks until the user clicks Agree)
+        self._appearance_mtime = self._appearance_stamp()
+        self.tray = None
+        self._tray_state = (False, False)
+        self.spotify = None
+        self._polling = False
+        self._client_id = None
+        self._poll_busy = False
+        self._poll_started = 0.0
+
+        # The strip itself always comes up, even when Spotify can't be reached,
+        # so problems are shown *on it* (and in the log) instead of nowhere.
+        self._build_desktop_ui(restore_lock=True)
+        self.root.after(UI_CALL_DRAIN_MS, self._drain_ui_calls)
+        self.root.after(APPEARANCE_WATCH_MS, self._watch_appearance)
+        self.root.after(RESULT_DRAIN_MS, self._drain_results)
+        self.root.after(LINE_TICK_MS, self._line_tick)
+
+        self._connect_spotify()
+        self._maybe_show_first_run_login()
+
+    # ---------------------------------------------------- Spotify connection --
+
+    def _maybe_show_first_run_login(self):
+        """First launch with no Spotify details at all (no app ID, no saved login): open the
+        login window so there is a visible button to press, instead of only a line on the strip."""
+        try:
+            client_id, _secret = config.load_credentials()
+        except Exception:
+            client_id = None
+        if client_id or config.logged_in():
+            return      # an ID exists: _connect_spotify already started the browser login
+        self.root.after(800, self.open_login_window)
+
+    def _login_in_progress(self):
+        t = self._login_thread
+        return t is not None and t.is_alive()
+
+    def _start_login_thread(self):
+        """Open Spotify's login page in the browser and wait (off the UI thread) for the
+        user to click Agree. Polling is held back until it finishes."""
+        spotify = self.spotify
+        if spotify is None or self._login_in_progress():
+            return
+
+        def work():
+            ok, err = False, None
+            try:
+                ok = spotify.login()
+            except Exception as exc:
+                log.exception("Spotify login failed")
+                err = str(exc) or type(exc).__name__
+            self.post(lambda: self._login_done(spotify, ok, err))
+
+        self._set_notice("Log in to Spotify and click Agree in the page that just opened in your browser", "info")
+        self._login_thread = threading.Thread(target=work, daemon=True, name="spotify-login")
+        self._login_thread.start()
+
+    def _login_done(self, spotify, ok, err):
+        self._login_thread = None
+        if spotify is not self.spotify:
+            return      # logged out or switched app while the browser page was open
+        if ok:
+            log.info("Spotify login finished")
+            self._clear_notice()
+            self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
+            self._start_poll_worker()
+        else:
+            self._set_notice("Spotify login didn't finish: right-click the tray icon > Log in with Spotify to try again", "error")
+        self._refresh_tray()
+
+    def _connect_spotify(self):
+        """Read the credentials and (re)start the Spotify client. Used at startup
+        and again whenever Settings saves new credentials, so no restart is needed.
+        Returns True when a client is running."""
+        try:
+            client_id, client_secret = config.load_credentials()
+        except Exception as exc:
+            log.exception("couldn't read config.json")
+            client_id = client_secret = None
+            self._set_notice("config.json is unreadable: %s" % exc, "error")
+        if not client_id:
+            log.error("No Spotify client ID: enter a Client ID in the login window or Settings (%s)",
+                      config.CONFIG_PATH)
+            if self._notice is None:
+                self._set_notice("Not logged in: right-click the system tray icon > Log in with Spotify", "error")
+            return False
+
+        try:
+            self.spotify = SpotifyClient(client_id, client_secret)
+        except Exception as exc:
+            log.exception("couldn't start the Spotify client")
+            self._set_notice("Spotify client couldn't start: %s" % exc, "error")
+            return False
+        self._client_id = (client_id, bool(client_secret))
+
+        if not os.path.exists(config.TOKEN_CACHE_PATH):
+            self._start_login_thread()      # opens the browser page; polling waits for it
+        if not self._polling:
+            self._polling = True
+            self.root.after(0, self._poll)
+        return True
+
+    def login_spotify(self):
+        """Tray / button: start a fresh browser login (also fixes an expired one)."""
+        if self._login_in_progress():
+            self._set_notice("Still waiting for the Spotify login: finish it in the browser tab that opened", "info", seconds=8)
+            return
+        try:
+            has_id = bool(config.load_credentials()[0])
+        except Exception:
+            has_id = False
+        if not has_id:
+            # Nothing to log in with yet (this build has no built-in app): show the window that
+            # explains it and lets the user add their own app, rather than doing nothing.
+            self.open_login_window()
+            return
+        try:
+            os.remove(config.TOKEN_CACHE_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.exception("couldn't remove the old Spotify login")
+        self._clear_notice()
+        self.spotify = None
+        if self._connect_spotify():
+            self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
+            self._start_poll_worker()
+        self._refresh_tray()
+
+    def logout_spotify(self):
+        """Tray > Log out: forget the saved Spotify login and stop polling."""
+        try:
+            os.remove(config.TOKEN_CACHE_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.exception("couldn't remove the Spotify login")
+        self.spotify = None
+        self._set_notice("Logged out: right-click the system tray icon > Log in with Spotify", "error")
+        self._refresh_tray()
+        log.info("logged out of Spotify")
+
+    def apply_credentials(self):
+        """Settings saved new Spotify credentials: switch to them now. A saved login
+        (the token cache) belongs to the app whose client ID produced it, so it is
+        dropped when the ID changed; the browser approval page then opens once."""
+        old_id = getattr(self, "_client_id", None)
+        try:
+            new_id, _secret = config.load_credentials()
+        except Exception:
+            new_id = None
+        try:
+            new_id = (new_id, bool(_secret)) if new_id else None
+        except Exception:
+            pass
+        if old_id and new_id and new_id != old_id:
+            try:
+                os.remove(config.TOKEN_CACHE_PATH)
+                log.info("client ID changed: cleared the saved Spotify login")
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.exception("couldn't remove the old Spotify login cache")
+        if self._login_in_progress():
+            self._set_notice("Still waiting for the Spotify login: finish it in the browser tab that opened", "info", seconds=8)
+            return False
+        log.info("Spotify credentials changed; reconnecting")
+        self._clear_notice()
+        # The new client replaces the old one in a single assignment (background threads may
+        # be using it right now); if the new one cannot start, the old one keeps running.
+        if self._connect_spotify():
+            self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
+            self._start_poll_worker()      # don't wait for the next scheduled poll
+            return True
+        return False
+
+    # ----------------------------------------------------------------- DPI --
+
+    def _detect_scale(self):
+        """Display scale factor as Tk sees it. Once the process is DPI aware
+        (winsys.enable_dpi_awareness, called in main()) Tk reports the real DPI;
+        an unaware process always sees 96 and so gets 1.0 (Windows stretches it).
+        Font sizes are in points and follow this automatically; every size given
+        in pixels (strip size, slots, outline, padlock) is multiplied by it."""
+        try:
+            value = float(self.root.winfo_fpixels("1i")) / 96.0
+        except Exception:
+            return 1.0
+        scale = max(1.0, min(4.0, round(value, 2)))
+        if scale != 1.0:
+            log.info("display scale %.0f%%", scale * 100)
+        return scale
+
+    def _px(self, logical):
+        return int(round(logical * self.scale))
+
+    @property
+    def strip_w(self):
+        return self._px(DESKTOP_WIDTH)
+
+    @property
+    def strip_h(self):
+        return self._px(DESKTOP_HEIGHT)
+
+    def _show_setup_error(self, detail=None):
+        msg = "Not logged in to Spotify: right-click the system tray icon > Log in with Spotify"
+        if detail:
+            msg += f"\n({detail})"
+        self._set_notice(msg, "error")
+
+    # ------------------------------------------------------------ notices --
+
+    def _set_notice(self, text, kind="error", seconds=None):
+        """A small message on the strip (Spotify sign-in trouble etc.). Errors
+        stay until the problem clears; info notices can time out."""
+        until = time.perf_counter() + seconds if seconds else None
+        if self._notice and self._notice["text"] == text:
+            self._notice["until"] = until
+            return
+        self._notice = {"text": text, "kind": kind, "until": until}
+        log.info("strip notice (%s): %s", kind, text)
+
+    def _clear_notice(self, kind=None):
+        if self._notice and (kind is None or self._notice["kind"] == kind):
+            self._notice = None
+
+    def _active_notice(self):
+        n = self._notice
+        if n and n["until"] is not None and time.perf_counter() > n["until"]:
+            self._notice = n = None
+        return n
+
+    # ----------------------------------------- cross-thread calls (tray etc.) --
+
+    def post(self, fn):
+        """Thread-safe: run fn on the Tk thread soon."""
+        self._ui_calls.put(fn)
+
+    def _drain_ui_calls(self):
+        try:
+            while True:
+                fn = self._ui_calls.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    log.exception("error in posted UI call")
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(UI_CALL_DRAIN_MS, self._drain_ui_calls)
+
+    # ------------------------------------------------ live appearance reload --
+
+    @staticmethod
+    def _appearance_stamp():
+        try:
+            st = os.stat(config.APPEARANCE_PATH)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _watch_appearance(self):
+        """appearance.json changed (settings window or a hand edit)? Apply it."""
+        try:
+            stamp = self._appearance_stamp()
+            if stamp != self._appearance_mtime:
+                self._appearance_mtime = stamp
+                self.reload_appearance()
+        except Exception:
+            log.exception("appearance watch error (recovering)")
+        finally:
+            self.root.after(APPEARANCE_WATCH_MS, self._watch_appearance)
+
+    def reload_appearance(self):
+        """Re-read appearance.json and apply it to the running strip: colours,
+        font sizes, strip size, outline, offset and title card, with
+        no restart."""
+        old_bg, old_w, old_h = DESKTOP_BG, DESKTOP_WIDTH, DESKTOP_HEIGHT
+        _load_appearance()
+        self._refresh_tray()
+        self.desktop_curr_size = DESKTOP_CURR_SIZE
+        self.desktop_next_size = DESKTOP_NEXT_SIZE
+        self._desktop_top_font.configure(size=self.desktop_curr_size)
+        self._desktop_next_font.configure(size=self.desktop_next_size)
+        self._measure_font.configure(size=self.desktop_curr_size)
+        if (DESKTOP_WIDTH, DESKTOP_HEIGHT) != (old_w, old_h):
+            self.root.geometry(f"{self.strip_w}x{self.strip_h}+{self.root.winfo_x()}+{self.root.winfo_y()}")
+            self.desktop_canvas.configure(width=self.strip_w, height=self.strip_h)
+        if DESKTOP_BG != old_bg:
+            self.root.configure(bg=DESKTOP_BG)
+            self.desktop_canvas.configure(bg=DESKTOP_BG)
+            self._enable_transparency()
+        self._rebuild_segments()
+        self.title_text = self._make_title(self.track) if self.track else ""
+        self._reposition_lock_icon()
+        log.info("appearance settings applied live")
+
+    # ---------------------------------------------------------- desktop UI --
+
+    def _virtual_screen(self):
+        """(x, y, w, h) of the whole desktop across monitors."""
+        if sys.platform.startswith("win"):
+            try:
+                import ctypes
+
+                u = ctypes.windll.user32
+                x, y, w, h = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+                if w > 0 and h > 0:
+                    return x, y, w, h
+            except Exception:
+                pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _initial_position(self):
+        """Where the strip starts: the spot it was last left in if there is
+        one (kept on-screen even if monitors changed), otherwise centred
+        horizontally and high up the screen."""
+        vx, vy, vw, vh = self._virtual_screen()
+        state = config.load_window_state()
+        try:
+            x, y = int(state["x"]), int(state["y"])
+            x = max(vx - self.strip_w + 80, min(x, vx + vw - 80))
+            y = max(vy, min(y, vy + vh - 60))
+            return x, y, bool(state.get("locked", False))
+        except (KeyError, TypeError, ValueError):
+            pass
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        return (sw - self.strip_w) // 2, int(sh * SPAWN_Y_PERCENT / 100), False
+
+    def _build_desktop_ui(self, restore_lock=True):
+        """A frameless, draggable, always-on-top strip showing the current
+        line (karaoke-coloured) with the next line underneath.
+
+        - Left-click and drag to move it (only while unlocked). Where you leave
+          it is remembered for next time.
+        - No right-click menu: use the tray icon (lock, settings, quit).
+        - The small padlock pins it in place; once locked, on Windows it also
+          becomes click-through. Whether it was locked is remembered too.
+        """
+        self.desktop_mode = True
+        self._clear_root()
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.configure(bg=DESKTOP_BG)
+        self.root.protocol("WM_DELETE_WINDOW", self._quit)
+
+        x, y, was_locked = self._initial_position()
+        self.root.geometry(f"{self.strip_w}x{self.strip_h}+{x}+{y}")
+
+        self.desktop_canvas = tk.Canvas(
+            self.root, width=self.strip_w, height=self.strip_h,
+            bg=DESKTOP_BG, highlightthickness=0, bd=0,
+        )
+        self.desktop_canvas.pack(fill="both", expand=True)
+        self.desktop_canvas.bind("<ButtonPress-1>", self._start_drag)
+        self.desktop_canvas.bind("<B1-Motion>", self._do_drag)
+        self.desktop_canvas.bind("<ButtonRelease-1>", self._end_drag)
+        self.root.bind("<Configure>", self._on_desktop_configure)
+
+        # Fonts are built once and resized in place: recreating Font objects
+        # on every ~40ms redraw would leak Tcl font resources.
+        self._desktop_top_font = tkfont.Font(family="Segoe UI", size=self.desktop_curr_size, weight="bold")
+        self._desktop_next_font = tkfont.Font(family="Segoe UI", size=self.desktop_next_size)
+        self._measure_font = tkfont.Font(family="Segoe UI", size=self.desktop_curr_size, weight="bold")
+
+        self._enable_transparency()
+        self._build_lock_icon()
+        self.desktop_locked = bool(was_locked and restore_lock)
+        # No window-style changes here: the window isn't mapped yet, so Tk hasn't
+        # built its real Win32 wrapper. Styles are applied once it is mapped.
+        self._apply_lock_state(restyle=False)
+        self._schedule_startup_window_work()
+
+        self._anim_start_perf = None
+        if self.lyrics:
+            self._rebuild_segments()
+        self._redraw_desktop_canvas()
+        self._desktop_tick()
+
+    def _start_drag(self, event):
+        if self.desktop_locked:
+            return
+        self._drag_offset = (event.x, event.y)
+        self._raise_lock_icon()
+
+    def _do_drag(self, event):
+        if self.desktop_locked:
+            return
+        x = self.root.winfo_pointerx() - self._drag_offset[0]
+        y = self.root.winfo_pointery() - self._drag_offset[1]
+        self.root.geometry(f"+{x}+{y}")
+
+    def _end_drag(self, _event=None):
+        self._save_window_state()
+        self._raise_lock_icon()
+
+    def _raise_lock_icon(self):
+        """Clicking the strip lifts it above the padlock window (both are topmost;
+        the last one clicked wins). Put the padlock back on top if it's showing."""
+        if self.lock_window is not None and self._lock_icon_visible:
+            try:
+                self.lock_window.attributes("-topmost", True)
+                self.lock_window.lift()
+            except tk.TclError:
+                pass
+
+    def _on_desktop_configure(self, _event):
+        self._reposition_lock_icon()
+
+    def _save_window_state(self):
+        if not self.desktop_mode:
+            return
+        try:
+            config.save_window_state({
+                "x": self.root.winfo_x(), "y": self.root.winfo_y(),
+                "locked": bool(self.desktop_locked),
+            })
+        except tk.TclError:
+            pass
+
+    def _quit(self):
+        self._save_window_state()
+        log.info("quitting")
+        if self.tray is not None:
+            self.tray.stop()
+            self.tray = None
+        self.root.destroy()
+
+    # ------------------------------------------- tray / settings / autostart --
+
+    def start_tray(self):
+        """Create the tray icon. Its actions are posted to the Tk thread."""
+        self._snapshot_tray_state()
+        self.tray = tray.TrayIcon(
+            actions={
+                "toggle_lock": self._toggle_lock,
+                "login": self.login_spotify,
+                "logout": self.logout_spotify,
+                "settings": self.open_settings,
+                "toggle_autostart": self._toggle_autostart,
+                "open_logs": self._open_logs_folder,
+                "quit": self._quit,
+            },
+            state=lambda: self._tray_state,
+            post=self.post,
+            can_autostart=winsys.is_windows(),
+        )
+        if not self.tray.start():
+            self.tray = None
+        return self.tray is not None
+
+    def _snapshot_tray_state(self):
+        """(locked, autostart) as plain values. The tray runs on its own
+        thread and must never touch Tk variables or the registry itself, so it reads
+        this snapshot, which is only ever rebuilt here on the Tk thread."""
+        self._tray_state = (bool(self.desktop_locked), bool(winsys.autostart_enabled()))
+        return self._tray_state
+
+    def _refresh_tray(self):
+        self._snapshot_tray_state()
+        if self.tray is not None:
+            self.tray.refresh()
+
+    def _toggle_autostart(self):
+        want = not winsys.autostart_enabled()
+        if not winsys.set_autostart(want):
+            self._set_notice("Couldn't change 'Start with Windows' - see the log", "error", seconds=8)
+        self._refresh_tray()
+
+    def _open_logs_folder(self):
+        try:
+            os.makedirs(applog.LOG_DIR, exist_ok=True)
+            if winsys.is_windows():
+                os.startfile(applog.LOG_DIR)   # noqa: S606 - opens Explorer on our own log folder
+        except Exception:
+            log.exception("couldn't open the logs folder")
+
+    def open_settings(self):
+        """The appearance editor, in-process: edits are saved as you make
+        them and picked up by the running strip within half a second."""
+        try:
+            if self._settings_window is not None:
+                try:
+                    self._settings_window.deiconify()
+                    self._settings_window.lift()
+                    self._settings_window.focus_force()
+                    return
+                except tk.TclError:
+                    self._settings_window = None
+            import config_editor
+            win = tk.Toplevel(self.root)
+            win.attributes("-topmost", True)   # the strip is topmost too; stay above it
+            config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_credentials=self.apply_credentials,
+                                       on_login=self.login_spotify, on_logout=self.logout_spotify)
+            win.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(win))
+            self._settings_window = win
+            win.focus_force()
+        except Exception:
+            log.exception("couldn't open settings")
+            self._set_notice("Couldn't open settings - see the log", "error", seconds=8)
+
+    def open_login_window(self):
+        """The small "Log in with Spotify" window (shown on first launch when no details exist)."""
+        try:
+            if self._login_window is not None:
+                try:
+                    self._login_window.deiconify()
+                    self._login_window.lift()
+                    self._login_window.focus_force()
+                    return
+                except tk.TclError:
+                    self._login_window = None
+            import config_editor
+            win = tk.Toplevel(self.root)
+            win.attributes("-topmost", True)
+            config_editor.LoginWindow(win, on_credentials=self.apply_credentials,
+                                      on_login=self.login_spotify, on_logout=self.logout_spotify)
+            win.protocol("WM_DELETE_WINDOW", lambda: self._close_login_window(win))
+            self._login_window = win
+            win.focus_force()
+        except Exception:
+            log.exception("couldn't open the login window")
+            self._set_notice("Couldn't open the login window - see the log", "error", seconds=8)
+
+    def _close_login_window(self, win):
+        self._login_window = None
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _close_settings(self, win):
+        self._settings_window = None
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _nudge_offset(self, delta_s):
+        global LYRIC_OFFSET_S
+        LYRIC_OFFSET_S = round(LYRIC_OFFSET_S + delta_s, 3)
+        config.update_appearance(lyric_offset_ms=int(round(LYRIC_OFFSET_S * 1000)))
+        log.info("lyric offset now %+.0f ms", LYRIC_OFFSET_S * 1000)
+
+    def _resize_desktop_text(self, delta):
+        self.desktop_curr_size = max(DESKTOP_CURR_MIN_SIZE, self.desktop_curr_size + delta)
+        self.desktop_next_size = max(DESKTOP_NEXT_MIN_SIZE, self.desktop_next_size + delta)
+        self._desktop_top_font.configure(size=self.desktop_curr_size)
+        self._desktop_next_font.configure(size=self.desktop_next_size)
+        self._measure_font.configure(size=self.desktop_curr_size)
+        self._rebuild_segments()   # how many characters fit on a line just changed
+
+    # ------------------------------------------------------- lock / pin UI --
+
+    def _build_lock_icon(self):
+        """A tiny always-clickable Toplevel floating over the strip's top
+        edge, showing a drawn padlock. It is never made click-through, so
+        it's there to unlock the strip again - but it only appears while the
+        pointer is over the strip (see _update_lock_icon_visibility)."""
+        self._teardown_lock_icon()
+        w, h = self._px(LOCK_ICON_SIZE[0]), self._px(LOCK_ICON_SIZE[1])
+        self.lock_window = tk.Toplevel(self.root)
+        self.lock_window.overrideredirect(True)
+        self.lock_window.attributes("-topmost", True)
+        self.lock_window.configure(bg=LOCK_ICON_BG)
+        self.lock_icon_label = tk.Canvas(
+            self.lock_window, width=w, height=h, bg=LOCK_ICON_BG,
+            highlightthickness=0, bd=0, cursor="hand2",
+        )
+        self.lock_icon_label.pack()
+        self.lock_icon_label.bind("<Button-1>", lambda _e: self._toggle_lock())
+        self._draw_lock_glyph()
+        self._lock_icon_visible = False
+        self.lock_window.withdraw()          # hidden until the pointer is over the strip
+        self._reposition_lock_icon()
+
+    def _draw_lock_glyph(self):
+        """Closed padlock when locked, open shackle when unlocked (drawn with
+        lines and a rectangle, so no font/emoji support is needed)."""
+        c = self.lock_icon_label
+        if c is None:
+            return
+        k = self.scale
+        w, h = self._px(LOCK_ICON_SIZE[0]), self._px(LOCK_ICON_SIZE[1])
+        c.delete("all")
+        cx = w / 2
+        body_top = h * 0.48
+        c.create_rectangle(cx - 6 * k, body_top, cx + 6 * k, h - 4 * k, fill=LOCK_ICON_FG, outline=LOCK_ICON_FG)
+        width = max(1, round(2 * k))
+        if self.desktop_locked:
+            end_y = body_top
+        else:
+            end_y = 10 * k        # open shackle: the right leg stops short of the body
+        c.create_line(cx - 4 * k, body_top, cx - 4 * k, 8 * k, cx - 2 * k, 5 * k, cx + 2 * k, 5 * k,
+                      cx + 4 * k, 8 * k, cx + 4 * k, end_y, fill=LOCK_ICON_FG, width=width)
+
+    def _teardown_lock_icon(self):
+        if self.lock_window is not None:
+            try:
+                self.lock_window.destroy()
+            except tk.TclError:
+                pass
+        self.lock_window = None
+        self.lock_icon_label = None
+
+    def _reposition_lock_icon(self):
+        if self.lock_window is None:
+            return
+        try:
+            icon_w = self._px(LOCK_ICON_SIZE[0])
+            x = self.root.winfo_x() + (self.strip_w - icon_w) // 2
+            y = self.root.winfo_y() + self._px(4)
+            self.lock_window.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def _toggle_lock(self):
+        self.desktop_locked = not self.desktop_locked
+        self._apply_lock_state()
+        self._save_window_state()
+
+    def _apply_lock_state(self, restyle=True):
+        self._draw_lock_glyph()
+        self._show_border = False      # the frame only ever shows on hover while unlocked
+        if restyle:
+            self._set_windows_clickthrough(self.desktop_locked)
+        self._reposition_lock_icon()
+        self._refresh_tray()
+
+    def _schedule_startup_window_work(self):
+        """Once the window is really mapped, apply a restored lock."""
+        self._startup_styled = False
+        self.root.after(200, self._startup_when_mapped)
+
+    def _startup_when_mapped(self, tries=0):
+        if self._startup_styled:
+            return
+        try:
+            mapped = bool(self.root.winfo_ismapped())
+        except tk.TclError:
+            return
+        if not mapped and tries < 50:            # give it up to ~10 s
+            self.root.after(200, lambda: self._startup_when_mapped(tries + 1))
+            return
+        self._startup_styled = True
+        if not mapped:
+            log.warning("strip window still not mapped after 10 s; applying window styles anyway")
+        if self.desktop_locked:                  # only a restored lock needs a style change
+            self._set_windows_clickthrough(True)
+
+    def _set_windows_clickthrough(self, enabled):
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            self.root.update_idletasks()
+            info = winsys.set_clickthrough(self.root.winfo_id(), enabled)
+            if info:
+                hwnd, before, after = info
+                log.info("click-through %s: hwnd %s exstyle %#x -> %#x",
+                         "on" if enabled else "off", hwnd, before & 0xFFFFFFFF, after & 0xFFFFFFFF)
+            # A style change can drop the colour key: put it back and read it back.
+            self._enable_transparency()
+        except Exception as exc:
+            log.warning("click-through toggle failed: %s", exc)
+
+    def _force_windows_redraw(self):
+        """Ask Windows for a repaint (no erase). -transparentcolor is a hard
+        chroma key, not real alpha, so the compositor can otherwise leave
+        stale glyph pixels behind when text changes or disappears."""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            winsys.invalidate(self.root.winfo_id())
+        except Exception as exc:
+            if not getattr(self, "_warned_redraw", False):
+                self._warned_redraw = True
+                log.warning("window repaint request failed (logged once): %s", exc)
+
+    def _enable_transparency(self):
+        """See-through background is a Windows-only tkinter trick; elsewhere
+        this is a no-op and the strip just has a solid dark background."""
+        if sys.platform.startswith("win"):
+            try:
+                self.root.attributes("-transparentcolor", DESKTOP_BG)
+            except tk.TclError:
+                pass
+
+    def _disable_transparency(self):
+        if sys.platform.startswith("win"):
+            try:
+                self.root.attributes("-transparentcolor", "")
+            except tk.TclError:
+                pass
+
+    def _clear_root(self):
+        self.root.unbind("<Configure>")
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    # ------------------------------------------------------------ polling --
+
+    def _next_poll_delay_ms(self):
+        now = time.perf_counter()
+        if now < self._fast_poll_until:
+            return FAST_POLL_MS
+        if self.current_track_id is None:
+            return POLL_INTERVAL_IDLE_MS
+        if self._is_playing and self.duration_s:
+            remaining = self.duration_s - self._raw_position_s()
+            if remaining < END_OF_TRACK_WINDOW_S:
+                # Aim just past the end of the song so the next one is
+                # noticed almost as soon as it starts.
+                return int(max(250, min(POLL_INTERVAL_MS, (remaining + 0.15) * 1000)))
+        return POLL_INTERVAL_MS
+
+    def _poll(self):
+        """Kick off a background fetch and reschedule. The network never runs
+        on the UI thread, so a slow response can't freeze the strip."""
+        try:
+            self._start_poll_worker()
+        finally:
+            self.root.after(self._next_poll_delay_ms(), self._poll)
+
+    def _start_poll_worker(self):
+        try:
+            now = time.perf_counter()
+            if self.spotify is None or self._login_in_progress():
+                return
+            if not self._poll_busy:
+                self._poll_busy = True
+                self._poll_started = now
+                threading.Thread(
+                    target=self._poll_worker, args=(self.current_track_id,),
+                    daemon=True, name="spotify-poll",
+                ).start()
+            elif now - self._poll_started > 45:
+                log.warning("previous poll never finished; starting a new one")
+                self._poll_busy = False
+        except Exception:
+            self._poll_busy = False
+            log.exception("unexpected poll error (recovering)")
+
+    def _poll_worker(self, known_track_id):
+        try:
+            spotify = self.spotify      # local copy: Settings may swap in a new client meanwhile
+            status, track = spotify.poll()
+            received = time.perf_counter()
+            # Hand the track over immediately so the title card can appear
+            # while the lyrics are still being looked up.
+            self._results.put(("track", status, track, received))
+            if status == "ok" and track and track["id"] != known_track_id:
+                result = fetch_lyrics(track["name"], track["artist"], track["album"], track["duration_ms"])
+                self._results.put(("lyrics", track["id"], result))
+                # Own thread: prefetching must never keep the poller busy, or the
+                # next song change would be noticed late.
+                threading.Thread(target=self._prefetch_next, args=(track,),
+                                 daemon=True, name="lyrics-prefetch").start()
+        except Exception:
+            log.exception("poll worker error (recovering)")
+            self._results.put(("track", "error", None, time.perf_counter()))
+
+    PREFETCH_COUNT = 3
+
+    def _prefetch_next(self, current):
+        """Look up the lyrics of the next PREFETCH_COUNT queued songs while
+        this one plays, so they are already cached when those songs start."""
+        try:
+            done = {current["id"]}
+            for nxt in self.spotify.get_upcoming_tracks(self.PREFETCH_COUNT):
+                if self.current_track_id != current["id"]:
+                    return   # song changed meanwhile; the new song starts its own prefetch
+                if nxt["id"] in done:
+                    continue   # the song itself again (repeat) or a duplicate in the queue
+                done.add(nxt["id"])
+                log.info("prefetching lyrics for upcoming track: %s", nxt["name"])
+                fetch_lyrics(nxt["name"], nxt["artist"], nxt["album"], nxt["duration_ms"])
+        except Exception:
+            log.exception("prefetch error (recovering)")
+
+    def _drain_results(self):
+        try:
+            while True:
+                msg = self._results.get_nowait()
+                try:
+                    if msg[0] == "track":
+                        self._handle_track(*msg[1:])
+                    elif msg[0] == "lyrics":
+                        self._handle_lyrics(*msg[1:])
+                except Exception:
+                    log.exception("error applying %s result (recovering)", msg[0])
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(RESULT_DRAIN_MS, self._drain_results)
+
+    # ------------------------------------------------------ track / lyrics --
+
+    def _handle_track(self, status, track, received):
+        self._poll_busy = False
+        if status == "auth_error":
+            if getattr(self.spotify, "last_auth_status", None) == 403:
+                self._set_notice("Spotify says this account isn't allowed on this app: add it under Users and Access, "
+                                 "or use your own app (tray > Settings > Advanced)", "error")
+            else:
+                self._set_notice("Spotify login failed or expired: right-click the tray icon > Log in with Spotify", "error")
+            return
+        if status == "error":
+            return   # couldn't find out: keep showing what we had
+        self._clear_notice()   # Spotify answered: any sign-in/first-run notice is out of date
+
+        if status == "idle" or track is None:
+            if self.current_track_id is not None:
+                log.info("nothing playing")
+            self._reset_track_state()
+            self._is_playing = False
+            self._refresh_current_labels()
+            return
+
+        changed = track["id"] != self.current_track_id
+        if changed:
+            self._begin_track(track)
+
+        polled = track["progress_ms"] / 1000.0
+        was_playing = self._is_playing
+        if not changed and was_playing and track["is_playing"]:
+            # Nudge the running estimate toward Spotify's jittery figure
+            # instead of snapping, unless the gap is a real seek.
+            est = self._last_position_s + (received - self._last_poll_perf)
+            diff = polled - est
+            position = est + diff * POLL_CORRECTION_GAIN if abs(diff) < POLL_SEEK_THRESHOLD_S else polled
+        else:
+            position = polled
+        self._last_position_s = position
+        self._last_poll_perf = received
+        self._is_playing = bool(track["is_playing"])
+        self.duration_s = (track.get("duration_ms") or 0) / 1000.0
+        if not was_playing and self._is_playing and not changed:
+            self._anim_start_perf = None   # resumed: show the line in place, no slide
+
+        self._update_display(self._estimate_position_s())
+        self._refresh_current_labels()
+
+    def _reset_track_state(self):
+        self.current_track_id = None
+        self.track = None
+        self.title_text = ""
+        self.duration_s = 0.0
+        self.lyrics_state = "none"
+        self.lyrics, self.line_words, self.norm_lines, self.norm_tokens = [], None, [], None
+        self.segments, self.seg_starts, self.line_infos = [], [], []
+        self.current_index = -1
+        self._anim_start_perf = None
+
+    def _begin_track(self, track):
+        log.info("now playing: %s - %s", track["artist"], track["name"])
+        self._reset_track_state()
+        self.current_track_id = track["id"]
+        self.track = track
+        self.lyrics_state = "pending"
+        self.title_text = self._make_title(track)
+        self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
+
+    def _make_title(self, track):
+        """'Artist - Song', with numbers/symbols spelled out and non-Latin
+        text romanized."""
+        if not track:
+            return ""
+        artist = normalize(track.get("artist", ""))
+        name = normalize(track.get("name", ""))
+        text = f"{artist} - {name}" if artist and name else (artist or name)
+        if needs_romanization(text):
+            text = romanize_line(text, detect_script(text))
+        return text
+
+    def _handle_lyrics(self, track_id, result):
+        if track_id != self.current_track_id:
+            return   # the song changed while we were fetching
+        synced = words = None
+        if result:
+            synced, _plain, words = result
+        if not synced:
+            self.lyrics_state = "missing"
+            self.lyrics, self.segments = [], []
+            return
+
+        self.lyrics = list(synced)
+        self.line_words = words if words and len(words) == len(synced) else None
+        # Numbers and symbols -> the words a singer would say, before anything
+        # else (romanizing, splitting) sees the text.
+        self.norm_lines = [normalize(text) for _ts, text in self.lyrics]
+        self.norm_tokens = None
+        if self.line_words:
+            self.norm_tokens = [
+                [(s, e, normalize(t, lang=line_language(self.lyrics[i][1]))) for s, e, t in line]
+                for i, line in enumerate(self.line_words)
+            ]
+        self.song_hint = detect_script(" ".join(self.norm_lines))
+
+        self.lyrics_state = "ready"
+        self._rebuild_segments()
+        log.info("lyrics ready: %d lines, first at %.1fs, %d displayed segments, song position %.1fs",
+                 len(self.lyrics), self.lyrics[0][0], len(self.segments), self._raw_position_s())
+
+    # ---------------------------------------------------- segments / layout --
+
+    def _max_chars(self):
+        """How many characters fit on the top line before it gets split."""
+        if MAX_LINE_CHARS > 0:
+            return MAX_LINE_CHARS
+        font = getattr(self, "_measure_font", None)
+        if font is None or not self.desktop_mode:
+            return 42
+        try:
+            sample = "The quick brown fox jumps over"
+            avg = font.measure(sample) / len(sample)
+            usable = self.strip_w - self._px(DESKTOP_TEXT_MARGIN)
+            return max(20, min(80, int(usable / max(avg, 1) * 0.95)))
+        except tk.TclError:
+            return 42
+
+    def _line_display(self, i):
+        """(text as displayed, per-word timing or None) for lyric line i under
+        romanization (always on)."""
+        norm = self.norm_lines[i]
+        rom = needs_romanization(norm)
+        text = romanize_line(norm, self.song_hint) if rom else norm
+        words = None
+        if self.norm_tokens is not None and text.strip():
+            words = []
+            for s, e, t in self.norm_tokens[i]:
+                shown = romanize_line(t, self.song_hint) if rom else t
+                words.append((s, e, max(1, len(shown))))
+        return text, words
+
+    def _rebuild_segments(self):
+        """Recompute the displayed lines (called when the lyrics arrive or a
+        display setting changes). Long lines are split here."""
+        if not self.lyrics:
+            self.segments, self.seg_starts, self.line_infos = [], [], []
+            self.current_index = -1
+            self._refresh_current_labels()
+            return
+        displays = [self._line_display(i) for i in range(len(self.lyrics))]
+        self.segments, self.line_infos = layout.build_segments(
+            self.lyrics, displays, self._max_chars(), self.LAST_LINE_ASSUMED_SPAN,
+            KARAOKE_CHARS_PER_SECOND, KARAOKE_MIN_FILL_SECONDS,
+        )
+        self.seg_starts = [s.start for s in self.segments]
+        self.current_index = layout.index_for_position(self.seg_starts, self._estimate_position_s())
+        self._anim_start_perf = None
+        self._refresh_current_labels()
+
+    # ------------------------------------------------------------- timing --
+
+    def _raw_position_s(self):
+        """Playback position in the song, without the lyric-offset tweak."""
+        if not self._is_playing:
+            return self._last_position_s
+        return self._last_position_s + (time.perf_counter() - self._last_poll_perf)
+
+    def _estimate_position_s(self):
+        """Playback position for lyric timing (raw position plus the user's
+        offset), so lines and the fill move smoothly between polls."""
+        return self._raw_position_s() + LYRIC_OFFSET_S
+
+    def _line_tick(self):
+        """Re-check which line is current on a much shorter cadence than the
+        Spotify poll, so lines never show up late or get skipped."""
+        try:
+            if self.segments and self._is_playing:
+                self._update_display(self._estimate_position_s())
+        except Exception:
+            log.exception("line tick error (recovering)")
+        finally:
+            self.root.after(LINE_TICK_MS, self._line_tick)
+
+    def _update_display(self, position_s):
+        if not self.segments:
+            return
+        idx = layout.index_for_position(self.seg_starts, position_s)
+        if idx == self.current_index:
+            return
+        self.current_index = idx
+        self._anim_start_perf = time.perf_counter()
+        self._refresh_current_labels()
+
+    # ---------------------------------------------------- what to show (scene) --
+
+    def _scene(self):
+        """What the strip should show right now: (kind, top, next) or None for a completely clear screen. Paused, stopped, or
+        nothing playing all mean None - the lyrics vanish."""
+        if not self._is_playing or self.current_track_id is None:
+            return None
+        pos = self._raw_position_s()
+        state = self.lyrics_state
+
+        if state == "ready" and self.segments:
+            idx = self.current_index
+            if idx >= 0:
+                seg = self.segments[idx]
+                nxt = self.segments[idx + 1].text if idx + 1 < len(self.segments) else ""
+                return "lyric", seg.text, nxt
+            # Before the first line: the title card, with the first line as a preview.
+            if SHOW_TITLE_CARD and self.title_text and pos < TITLE_CARD_MAX_S:
+                return "title", self.title_text, self.segments[0].text
+            return None
+
+        if SHOW_TITLE_CARD and self.title_text:
+            if state == "pending" and pos < TITLE_CARD_MAX_S:
+                return "title", self.title_text, ""
+            if state == "missing" and pos < NO_LYRICS_NOTICE_S:
+                return "title", self.title_text, "No synced lyrics found for this track"
+        return None
+
+    def _refresh_current_labels(self):
+        """Repaint the strip."""
+        if self.desktop_mode:
+            self._redraw_desktop_canvas()
+
+    # ------------------------------------------------- desktop lyrics draw --
+
+    def _desktop_tick(self):
+        if not self.desktop_mode:
+            return
+        try:
+            self._update_lock_icon_visibility()
+            self._redraw_desktop_canvas()
+            # Full Windows repaint only when what's shown changed (or every
+            # REDRAW_KEEPALIVE_S): invalidating with erase every 40 ms flickers.
+            sig = (self._scene(), bool(self._show_border), (self._notice or {}).get("text"))
+            now = time.perf_counter()
+            if sig != self._last_scene_sig or now - self._last_full_redraw > REDRAW_KEEPALIVE_S:
+                self._last_scene_sig = sig
+                self._last_full_redraw = now
+                self._force_windows_redraw()
+        except Exception:
+            # canvas.delete("all") has already wiped the old frame, so an
+            # uncaught error here would freeze the strip on stale content.
+            # Log it and try again next tick.
+            log.exception("desktop tick error (recovering)")
+        finally:
+            if self.desktop_mode:
+                self.root.after(DESKTOP_TICK_MS, self._desktop_tick)
+
+    def _pointer_over_strip(self):
+        try:
+            px, py = self.root.winfo_pointerx(), self.root.winfo_pointery()
+            x0, y0 = self.root.winfo_x(), self.root.winfo_y()
+        except tk.TclError:
+            return None
+        return x0 <= px < x0 + self.strip_w and y0 <= py < y0 + self.strip_h
+
+    def _update_lock_icon_visibility(self):
+        """Idle strip = only the lyrics: no frame, no lock icon. While the
+        pointer is over the strip the small padlock appears (locked or not),
+        and, when unlocked, a faint frame shows that it can be dragged. The
+        global cursor position is used because a locked strip is
+        click-through and never gets real hover events. The chrome lingers
+        for HOVER_HIDE_DELAY_S so the pointer can reach the icon."""
+        if self.lock_window is None:
+            return
+        over = self._pointer_over_strip()
+        if over is None:
+            return
+        now = time.perf_counter()
+        if over:
+            self._hover_since = now
+        show = over or (now - self._hover_since) < HOVER_HIDE_DELAY_S
+        self._show_border = bool(show and not self.desktop_locked)
+
+        if show and self._lock_icon_visible is not True:
+            self._reposition_lock_icon()
+            self.lock_window.deiconify()
+            self.lock_window.attributes("-topmost", True)   # deiconify can drop it behind other windows
+            self._lock_icon_visible = True
+        elif not show and self._lock_icon_visible is not False:
+            self.lock_window.withdraw()
+            self._lock_icon_visible = False
+
+    def _fit_font_size(self, font, text, base_size, min_size, max_width):
+        """Shrink `font` (in place) from base_size to whatever fits `text`
+        in max_width, stopping at min_size."""
+        if not text:
+            font.configure(size=base_size)
+            return base_size
+        size = base_size
+        font.configure(size=size)
+        while size > min_size and font.measure(text) > max_width:
+            size -= 1
+            font.configure(size=size)
+        return size
+
+    @staticmethod
+    def _ellipsize(font, text, max_width):
+        if font.measure(text) <= max_width:
+            return text
+        while len(text) > 1 and font.measure(text + "...") > max_width:
+            text = text[:-1]
+        return text.rstrip() + "..."
+
+    def _wrap_top_text(self, font, text, max_width, max_lines=DESKTOP_MAX_LINES):
+        """Last-resort wrap for a top line that still doesn't fit at the
+        smallest allowed size (normally long lines are split into separate
+        lines long before this)."""
+        if max_lines <= 1 or font.measure(text) <= max_width:
+            return [text]
+
+        words = text.split(" ")
+        lines = []
+        current = ""
+        i = 0
+        while i < len(words) and len(lines) < max_lines - 1:
+            word = words[i]
+            candidate = f"{current} {word}".strip()
+            if current and font.measure(candidate) > max_width:
+                lines.append(current)
+                current = ""
+                continue
+            current = candidate
+            i += 1
+        remainder = " ".join(words[i:])
+        current = f"{current} {remainder}".strip() if remainder else current
+        if current:
+            lines.append(current)
+
+        final = []
+        for line in lines:
+            if font.measure(line) <= max_width or " " in line:
+                final.append(line)
+            else:
+                final.extend(self._hard_split_word(font, line, max_width))
+        if len(final) > max_lines:
+            head = final[: max_lines - 1]
+            head.append("".join(final[max_lines - 1:]))
+            final = head
+        return final
+
+    @staticmethod
+    def _hard_split_word(font, word, max_width):
+        chunks = []
+        current = ""
+        for ch in word:
+            candidate = current + ch
+            if current and font.measure(candidate) > max_width:
+                chunks.append(current)
+                current = ch
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return chunks or [word]
+
+    def _current_fill_fraction(self):
+        if not self.segments or not (0 <= self.current_index < len(self.segments)):
+            return 0.0
+        seg = self.segments[self.current_index]
+        return layout.seg_fraction(seg, self.line_infos[seg.line], self._estimate_position_s())
+
+    def _redraw_desktop_canvas(self):
+        canvas = self.desktop_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+
+        if self._show_border:
+            canvas.create_rectangle(
+                0, 0, self.strip_w - 1, self.strip_h - 1, outline=HOVER_BORDER_RGB, width=1,
+            )
+
+        scene = self._scene()
+        notice = self._active_notice()
+        if notice is not None and scene is None:
+            self._draw_notice(canvas, notice)
+        if scene is None:
+            return   # paused / stopped / nothing to show: a clear screen
+        kind, top_text, next_text = scene
+
+        center_x = self.strip_w / 2
+        max_text_width = self.strip_w - self._px(DESKTOP_TEXT_MARGIN)
+        top_slot_y = self._px(46)
+        bottom_slot_y = self.strip_h - self._px(28)
+        outline = OUTLINE_SIZE * self.scale
+        next_outline = min(OUTLINE_SIZE, 1.0) * self.scale
+
+        # line-change animation progress (0 = just changed, 1 = settled)
+        anim_t = 1.0
+        if kind == "lyric" and self._anim_start_perf is not None:
+            anim_t = min(1.0, (time.perf_counter() - self._anim_start_perf) / LINE_ANIM_SECONDS)
+        eased_t = _ease_out_cubic(anim_t)
+
+        target_size = self._fit_font_size(
+            self._desktop_top_font, top_text, self.desktop_curr_size,
+            DESKTOP_CURR_MIN_SIZE, max_text_width,
+        )
+        self._fit_font_size(
+            self._desktop_next_font, next_text, self.desktop_next_size,
+            DESKTOP_NEXT_MIN_SIZE, max_text_width,
+        )
+        fraction = 0.0 if kind == "title" else self._current_fill_fraction()
+
+        # The finished line is simply gone the instant the next one starts:
+        # fading toward black over a chroma-key window just leaves a dark
+        # ghost. The new line rises from the next-line slot into the top slot.
+        top_lines = self._wrap_top_text(self._desktop_top_font, top_text, max_text_width)
+        if len(top_lines) > 1:
+            line_height = self._px(DESKTOP_CURR_MIN_SIZE + 6)
+            y = top_slot_y - (len(top_lines) - 1) * line_height / 2
+            for line in top_lines:
+                self._draw_karaoke_line(canvas, line, self._desktop_top_font, center_x, y, fraction, outline)
+                y += line_height
+        elif top_text:
+            incoming_y = bottom_slot_y + (top_slot_y - bottom_slot_y) * eased_t
+            incoming_size = round(self.desktop_next_size + (target_size - self.desktop_next_size) * eased_t)
+            self._desktop_top_font.configure(size=max(DESKTOP_NEXT_MIN_SIZE, incoming_size))
+            self._draw_karaoke_line(canvas, top_text, self._desktop_top_font, center_x, incoming_y, fraction, outline)
+            self._desktop_top_font.configure(size=target_size)
+
+        # The next line appears once the rising line has cleared its slot.
+        reveal = max(0.0, min(1.0, (anim_t - 0.35) / 0.65))
+        if next_text and reveal > 0.0:
+            y = bottom_slot_y + (1.0 - _ease_out_cubic(reveal)) * self._px(12)
+            shown = self._ellipsize(self._desktop_next_font, next_text, max_text_width)
+            _draw_outlined_text(
+                canvas, center_x, y, shown, self._desktop_next_font,
+                _rgb_to_hex(DESKTOP_NEXT_RGB), next_outline, anchor="center", justify="center",
+            )
+
+    def _draw_notice(self, canvas, notice):
+        fg = NOTICE_ERROR_FG if notice["kind"] == "error" else NOTICE_INFO_FG
+        font = self._desktop_next_font
+        text = self._ellipsize(font, notice["text"], self.strip_w - self._px(DESKTOP_TEXT_MARGIN))
+        _draw_outlined_text(
+            canvas, self.strip_w / 2, self.strip_h / 2, text, font, fg, 1.0 * self.scale,
+            anchor="center", justify="center",
+        )
+
+    def _draw_karaoke_line(self, canvas, text, font, center_x, y, fraction, outline_size):
+        """Draw `text` centered at (center_x, y) with a dark outline, turning
+        from yellow to pink left-to-right as `fraction` (0..1) of it is sung.
+        The fill edge blends over a band scaled to the average character width
+        so it sweeps instead of snapping per character."""
+        if not text:
+            return
+
+        # Cumulative prefix widths: positions taken this way match how the
+        # whole string is laid out, so the outline lines up with the fill.
+        prefix = [font.measure(text[:i]) for i in range(len(text) + 1)]
+        total_width = prefix[-1]
+        start_x = center_x - total_width / 2
+        fill_x = fraction * total_width
+
+        avg_char_width = total_width / max(1, len(text))
+        gradient_px = max(self._px(KARAOKE_GRADIENT_MIN_PX), avg_char_width * KARAOKE_GRADIENT_CHAR_SPAN)
+
+        _draw_outline_only(canvas, start_x, y, text, font, outline_size)
+
+        for i, ch in enumerate(text):
+            if ch == " ":
+                continue
+            ch_width = prefix[i + 1] - prefix[i]
+            x = start_x + prefix[i]
+            t = (prefix[i] + ch_width / 2 - fill_x) / gradient_px
+            t = max(0.0, min(1.0, t))
+            color = _rgb_to_hex(_lerp_rgb(KARAOKE_SUNG_RGB, KARAOKE_UNSUNG_RGB, t))
+            canvas.create_text(x, y, text=ch, font=font, fill=color, anchor="nw")
+
+def main():
+    # Started from a console (python app.py, a terminal)? Hand over
+    # to a console-less copy and let this one exit, so closing that console
+    # can never take the strip down with it.
+    if winsys.detach_from_console():
+        return
+    if not winsys.acquire_single_instance():
+        log.info("another copy is already running; exiting")
+        return
+    winsys.refresh_autostart()          # keep the Run entry pointing at where the app is now
+    dpi = winsys.enable_dpi_awareness()      # before the first Tk window, or it has no effect
+    if dpi:
+        log.info("DPI awareness: %s", dpi)
+    try:
+        import netease_crypto
+        log.info("NetEase word timing: %s", "cryptography available" if netease_crypto.available()
+                 else "unavailable (cryptography missing: %s)" % netease_crypto.IMPORT_ERROR)
+    except Exception:
+        log.warning("couldn't check the cryptography package", exc_info=True)
+    root = tk.Tk()
+    application = None
+    try:
+        application = LyricsApp(root)
+        application.start_tray()
+        root.mainloop()
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception:
+        log.exception("fatal error")
+        raise
+    finally:
+        try:
+            if application is not None and application.tray is not None:
+                application.tray.stop()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
