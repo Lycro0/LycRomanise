@@ -49,5 +49,5 @@ The source build has no built in Spotify app, so it opens a login window where y
 
 ## Credits
 
-Romanization uses [pypinyin](https://github.com/mozillazg/python pinyin) and
+Romanization uses [pypinyin](https://github.com/mozillazg/python-pinyin) and
 [pykakasi](https://github.com/miurahr/pykakasi); the Korean romanizer is implemented from scratch.
