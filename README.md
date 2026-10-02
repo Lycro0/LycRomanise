@@ -1,7 +1,7 @@
 # Lyricify Korean
 
 A small desktop app that shows synced, scrolling lyrics for whatever's
-playing on Spotify — like [Lyricify](https://github.com/WXRIW/Lyricify-App) —
+playing on Spotify, like [Lyricify](https://github.com/WXRIW/Lyricify-App),
 with one addition: **romanized lyrics for Korean songs**, alongside the
 usual Chinese (pinyin) and Japanese (romaji) support.
 
@@ -27,7 +27,7 @@ Windows media controls, and `media_client.py` reads that locally.
 - Needs the **Spotify desktop app on Windows** (not the web player). Install the packages in
   `requirements.txt` (the `winrt-*` ones do the reading).
 - If those packages are missing or Windows shows no Spotify session, it falls back to the
-  Spotify window title ("Artist - Song"). That has no length or position, so timing is counted
+  Spotify window title (the artist and song name). That has no length or position, so timing is counted
   from when the song was first seen and can drift after a seek.
 - Windows doesn't expose the queue, so next-song lyrics prefetch is off; lyrics load when a song starts.
 - To go back to the old API login, add `"playback_source": "spotify_api"` to `config.json`.
@@ -37,16 +37,16 @@ Windows media controls, and `media_client.py` reads that locally.
 - Polls Spotify for your currently playing track
 - Fetches synced lyrics from unofficial QQ Music and NetEase Cloud Music
   lookups and from [LRCLIB](https://lrclib.net) (a free, open, community-run
-  lyrics database — no API key needed). All three are asked at the same time
+  lyrics database, no API key needed). All three are asked at the same time
   and their answers are **cross-checked** before one is used (see "Lyric
-  sources" below); if they agree, the first of QQ → NetEase → LRCLIB wins —
+  sources" below); if they agree, the first of QQ → NetEase → LRCLIB wins,
   the same multi-source approach Lyricify itself uses
 - Shows the current line large, with the previous/next lines dimmed above
   and below, scrolling as the song plays
 - Detects whether the lyrics are Korean, Japanese, or Chinese and shows a
   romanized version (always on; there is no translation and no toggle)
 - Keeps the window always-on-top, like a mini lyrics overlay
-- **Desktop Lyrics** mode — the app's main view: a small floating strip
+- **Desktop Lyrics** mode, the app's main view: a small floating strip
   with the current line's romanization on top (karaoke-colored, turning
   from yellow to pink as playback moves through it) and the next line
   underneath, with a squeeze-up slide/fade transition between lines and a
@@ -95,7 +95,7 @@ Windows media controls, and `media_client.py` reads that locally.
 
 ## Desktop Lyrics mode
 
-Desktop Lyrics is what opens by default — a frameless, floating strip
+Desktop Lyrics is what opens by default: a frameless, floating strip
 that sits over your desktop or other apps:
 
 - **Drag** anywhere on it (while unlocked) to reposition it.
@@ -107,7 +107,7 @@ that sits over your desktop or other apps:
   dragged); both fade away shortly after the pointer leaves. Click the
   padlock, or use the tray menu, to lock/unlock. On Windows, locking also
   makes the strip click-through, so clicks land on whatever's underneath
-  it — the padlock stays clickable so you can always unlock it again. On
+  it. The padlock stays clickable so you can always unlock it again. On
   macOS/Linux, locking still stops it from being dragged, but true
   click-through isn't available there.
 - **Notices:** if Spotify sign-in fails or the credentials are missing, a
@@ -117,19 +117,19 @@ that sits over your desktop or other apps:
   softly blended rather than snapping instantly from one color to the
   other. LRCLIB only gives a timestamp for the *start* of each line (not
   per word), so the fill assumes an even pace across the line's
-  characters — a close approximation for most lyrics, not frame-accurate
-  word timing.
+  characters. This is a close approximation for most lyrics, not
+  frame-accurate word timing.
 - **Line transitions**: the upcoming line rises and grows from the
   "next line" slot up into the main position, then the *finished line
-  simply vanishes* the moment the next one starts — no fade, no ghost.
+  simply vanishes* the moment the next one starts, with no fade and no ghost.
   (On Windows the strip's black background is a color-key, not real
   alpha, so "fading" text can only ever turn dark-but-opaque, which is
   the black smear that used to linger. Everything is drawn at full color
   for that reason, and the earlier motion-blur trail was removed too.)
 - **Lyricify-style text**: the next line is regular-weight in the same
   yellow as unsung text, and all text has a black outline (drawn in
-  near-black `#010101` — pure black is the transparency key on Windows
-  and would vanish).
+  near-black `#010101`, because pure black is the transparency key on
+  Windows and would vanish).
 - **Sync**: NetEase lyrics with *word-level timing* (when the song has
   them) drive the karaoke fill directly; otherwise it estimates from line
   timestamps. Settings → *Lyric offset* nudges everything in
@@ -138,9 +138,9 @@ that sits over your desktop or other apps:
   snapping it, unless you seek.
 - **Auto-resizing text**: if a line (or the next-line preview) is too wide
   to fit the strip at the normal size, it shrinks down just for that line.
-  If it's still too wide even at the smallest readable size — which in
+  If it's still too wide even at the smallest readable size (which in
   practice mostly meant one long space-less run in the Japanese
-  romanizer — it wraps onto a second line, breaking at a word boundary
+  romanizer), it wraps onto a second line, breaking at a word boundary
   where there is one, or by character count as a last resort, rather
   than getting cut off or unreadably tiny.
 - **True see-through transparency** (so your actual desktop shows through
@@ -154,7 +154,7 @@ Open **Settings…** from the tray icon.
 It covers the karaoke colors, the next-line color, font sizes, the strip's
 width/height, lyric offset, outline, the optional title card and
 Start with Windows. **Every change is saved and applied to the running
-strip within about half a second** — there's no Save-and-restart. (The app
+strip within about half a second**, so there's no Save-and-restart. (The app
 watches `appearance.json`, so `python config_editor.py` on its own, or
 editing the file by hand, is picked up live too.) Delete `appearance.json`
 or hit "Reset to defaults" to go back to the built-in look.
@@ -162,14 +162,14 @@ or hit "Reset to defaults" to go back to the built-in look.
 ## The Korean romanizer
 
 `romanize/korean.py` implements Revised Romanization (RR 2000, South
-Korea's official standard) from scratch — no dictionary, no external
+Korea's official standard) from scratch, with no dictionary and no external
 service. It correctly handles **liaison** (연음), where a syllable's final
-consonant is pronounced as if it starts the next syllable — e.g. 한국어
-becomes `hangugeo`, not the letter-by-letter `hangug-eo` — including
-consonant clusters like 닭이 → `dalgi`.
+consonant is pronounced as if it starts the next syllable. For example, 한국어
+becomes `hangugeo`, not a letter-by-letter split such as `hangug` + `eo`.
+This includes consonant clusters like 닭이 → `dalgi`.
 
 It does *not* implement rarer, dictionary-dependent rules like
-palatalization (구개음화) or tensification (경음화) — see the comment at
+palatalization (구개음화) or tensification (경음화). See the comment at
 the top of that file for details and examples. For song lyrics it gets
 very close to how the line is actually sung.
 
@@ -199,7 +199,7 @@ One-time setup by the app owner (Lycro):
 - Python 3.9+
 - **A Spotify Premium account.** As of February 2026, Spotify requires the
   developer/app owner to have an active Premium subscription to use
-  Development Mode at all — the app will simply stop working if that
+  Development Mode at all. The app will simply stop working if that
   subscription lapses.
 - On Linux, tkinter's system package if it isn't already installed:
   `sudo apt install python3-tk` (Debian/Ubuntu) or the equivalent for your
@@ -221,7 +221,7 @@ pip install -r requirements.txt
    ```
    Spotify no longer accepts `localhost` as a redirect host (only the
    explicit loopback address `127.0.0.1` is allowed, and it's the one
-   exception to their HTTPS-only rule) — using `localhost` here will fail.
+   exception to their HTTPS-only rule). Using `localhost` here will fail.
 3. Under **Users and Access**, add your own Spotify account as an
    authorized user (Development Mode apps are capped at 5 users).
 4. Copy the **Client ID** and **Client Secret** from the app's Settings page.
@@ -249,7 +249,7 @@ export SPOTIPY_CLIENT_SECRET="your_client_secret"
 cp config.example.json config.json
 ```
 
-`config.json` is for local use only — don't commit it or share it. (Running `python config_editor.py`
+`config.json` is for local use only. Don't commit it or share it. (Running `python config_editor.py`
 on its own also saves credentials, but a strip that is already running only picks them up when
 saved from its own Settings window, or after a restart.)
 
@@ -271,12 +271,12 @@ won't ask again until the token expires.
   to *bypass* the limit; the fix is to make fewer requests.
 - **Lyric sources** are all asked at once and cross-checked (`lyrics_check.py`) before one is
   used, so a wrong answer from one source doesn't get romanized and shown. In order:
-  1. "No lyrics" stand-ins are thrown away - QQ/NetEase show "纯音乐，请欣赏" ("pure music, please
+  1. "No lyrics" stand-ins are thrown away. QQ/NetEase show "纯音乐，请欣赏" ("pure music, please
      enjoy") for instrumentals, and a search for an edition such as "House of Cards (Full Length
      Edition)" can land on one; romanized that is pinyin for a Korean song. If that is all there is,
      the strip says no lyrics were found instead.
   2. Lyrics in a different script from the other sources (Chinese lines next to Korean or English
-     ones - a translation or another song) are dropped. Two sources agreeing outvote one; on a
+     ones, for example a translation or another song) are dropped. Two sources agreeing outvote one; on a
      1-1 tie the song's own script (from its title/artist) wins, otherwise the original language
      is preferred over Chinese (order: Korean, Japanese, Latin, Cyrillic, Greek, Hebrew, Arabic,
      Devanagari, Chinese). A K-pop song with English lines is not mistaken for a translation.
@@ -308,7 +308,7 @@ won't ask again until the token expires.
   asked at all for 10 minutes, and that is remembered in `provider_health.json`, so a dead site costs
   nothing even on the first song after a restart; after the pause one failed call pauses it again.
   Delete `provider_health.json` to reset it. (Not verified against the live QQ site from the
-  development sandbox - check the log's `qq:` lines.)
+  development sandbox, so check the log's `qq:` lines.)
 - **Why a source missed is in the log** (`logs/spoti-lyrics.log`): no
   results, HTTP status, an error code from the site, every candidate that
   was rejected and why, or "no word-timed lyrics in the response". To check
@@ -316,8 +316,8 @@ won't ask again until the token expires.
   (prints each source's result and reasons; the one console tool).
   **Word-by-word (karaoke) timing needs NetEase's `yrc` data.** The plain, unauthenticated
   lyric endpoint does not return it, so when a NetEase match has no `yrc` there the app now asks
-  NetEase's *encrypted* lyric endpoints - first the web player's `weapi`, then the desktop
-  client's `eapi` (`netease_crypto.py`, needs the `cryptography` package) - which is where
+  NetEase's *encrypted* lyric endpoints (first the web player's `weapi`, then the desktop
+  client's `eapi`, in `netease_crypto.py`, which needs the `cryptography` package). That is where
   word-timed lyrics come from. What the log tells you:
   `word-timed (yrc) lyrics received via weapi` = worked;
   `answered but the song has no word-timed lyrics` = NetEase simply has none for that song
@@ -328,20 +328,20 @@ won't ask again until the token expires.
   (so it stays line-timed). This has been checked against the published algorithm and
   constants and with tests, but **not against NetEase's live servers**.
 - **Lyrics coverage isn't universal.** LRCLIB is community-contributed, so
-  some tracks — especially less mainstream releases — won't have synced
+  some tracks, especially less mainstream releases, won't have synced
   lyrics available; QQ Music and NetEase are asked at the same time for that
   reason. Their lookups use unofficial, undocumented endpoints (there's
   no official public API for them), the same kind of reverse-engineered
-  source most third-party lyrics tools rely on — they can change or start
+  source most third-party lyrics tools rely on. They can change or start
   blocking requests with no notice, at which point that source just
   quietly stops contributing lyrics and the others are unaffected. If a track has no lyrics anywhere, the app says so rather
   than showing nothing.
 - **Lyrics timing accounts for network latency**, adding back roughly half
   of each Spotify request's round-trip time so lines don't consistently
-  fire late on a slower connection — but it's still an estimate, not a
+  fire late on a slower connection, but it's still an estimate, not a
   perfectly precise clock.
-- **Reading playback state doesn't need extra Spotify API approval** — it's
-  a standard read-only scope — but Spotify has tightened Development Mode
+- **Reading playback state doesn't need extra Spotify API approval.** It's
+  a standard read-only scope, but Spotify has tightened Development Mode
   access generally over the past couple of years (fewer endpoints, a
   5-user cap, the Premium requirement above). If something that used to
   work suddenly 403s, check the
@@ -354,22 +354,22 @@ won't ask again until the token expires.
   transition, motion blur, the anti-residue changes, the forced Windows
   repaint) were written and reasoned through carefully, including
   reproducing the exact reported symptoms, but couldn't be verified
-  against a real display in the environment they were written in** — there's
-  no Windows machine or GUI available there. The constants that control
+  against a real display in the environment they were written in**, because
+  there's no Windows machine or GUI available there. The constants that control
   feel (`LINE_ANIM_SECONDS`, `MOTION_BLUR_STEPS`, `FADE_INVISIBLE_ALPHA`,
   near the top of `app.py`) are deliberately easy to find and tweak if
   something still looks off once you actually see it running.
 - The NetEase lyrics fallback's JSON handling was hardened against the
   `AttributeError: 'str' object has no attribute 'get'` crash (an
   unofficial endpoint occasionally returning a string instead of the
-  expected object) — every `.json()` call on that path now checks the
+  expected object). Every `.json()` call on that path now checks the
   shape it got back instead of assuming it.
 
 ## More features
 
-- **Title card**: off by default. Turn on `show_title_card` (Settings) to show "Artist - Song" until the first lyric line.
+- **Title card**: off by default. Turn on `show_title_card` (Settings) to show the artist and song name until the first lyric line.
 - **Long lines** are split into balanced chunks so they stay readable; word-timed lyrics keep karaoke sync per chunk.
-- **Numbers and symbols** are spoken out (`24` -> "twenty-four", `&` -> "and") before romanizing; decorative symbols are dropped.
+- **Numbers and symbols** are spoken out (`24` → "twenty-four", `&` → "and") before romanizing; decorative symbols are dropped.
 - **Romanization** for Korean, Japanese, Chinese, Cyrillic, Greek, Hebrew, Arabic-script and Devanagari lyrics, including mixed-script lines. Arabic and Hebrew are written without most vowels, so vowels are *guessed* (an "a" between consonants): treat them as approximate. Known simplifications: Arabic emphatic letters (ص ض ط ظ) and ح/ه are not distinguished from their plain forms, long vowels come out short, and the definite article isn't assimilated; Hebrew always guesses "a", and a vowelled sheva is dropped.
 - **Remembers** window position and lock state; lyrics clear on pause/stop; the lyrics of the next 2 queued tracks are fetched ahead of time (on a separate thread, so they never delay the current song).
 - **Logs** go to `logs/spoti-lyrics.log` next to the app (there is no console at all).
@@ -383,7 +383,7 @@ drawing.py              # pure drawing helpers: colour maths, outlined text
 winddiag.py             # window diagnostics line + on-screen lyric pixel count
 selftest.py             # python app.py --selftest (real-Tk check, writes logs/selftest-result.txt)
 layout.py               # line splitting, chunk timing, karaoke fill maths
-textnorm.py             # numbers/symbols -> spoken words
+textnorm.py             # numbers and symbols turned into spoken words
 applog.py               # file-only logging + crash capture (no console output)
 winsys.py               # console-less relaunch, single instance, start-with-Windows, DPI awareness,
                         # click-through / repaint calls
