@@ -1,0 +1,12 @@
+spotipy>=2.24.0
+requests>=2.31.0
+pypinyin>=0.51.0
+pykakasi>=2.2.1
+pystray>=0.19.5
+pillow>=10.0.0
+cryptography>=42.0.0
+winrt-runtime>=2.0.0; sys_platform == "win32"
+winrt-Windows.Media.Control>=2.0.0; sys_platform == "win32"
+winrt-Windows.Foundation>=2.0.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.0.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2.0.0; sys_platform == "win32"
