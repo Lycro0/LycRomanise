@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+logs/
+config.json
+appearance.json
+window_state.json
+lyrics_cache.json
+provider_health.json
+.spotify_token_cache
+build_tmp/
+*.exe
