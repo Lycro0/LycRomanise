@@ -1,5 +1,3 @@
-> This is the cleaned source for GitHub. The exe / installer build scripts (`LycRomanise.spec`, `build_exe.bat`, `installer.iss`) are kept out of the repo.
-
 # Lyricify Korean
 
 A small desktop app that shows synced, scrolling lyrics for whatever's
