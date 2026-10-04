@@ -262,6 +262,10 @@ _SYMBOLS = {
 }
 _NUMBER_WORD = {"en": "number", "ko": "번", "ja": "ナンバー", "zh": "第", "ar": "رقم", "ru": "номер"}
 
+_FRACTIONS = {"½": ("one half", "and a half"), "¼": ("one quarter", "and a quarter"),
+              "¾": ("three quarters", "and three quarters"), "⅓": ("one third", "and a third"),
+              "⅔": ("two thirds", "and two thirds")}
+
 _CURRENCY = "$€£¥₩"
 _NUM = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
 
@@ -351,6 +355,13 @@ def normalize(text, lang=None):
 
     # "<3" is a heart
     text = re.sub(r"<3+", " ", text)
+    # vulgar fractions and "w/", "w/o"
+    for ch, (alone, after_number) in _FRACTIONS.items():
+        text = re.sub(r"(?<=\d)\s?" + ch, f" {after_number} " if lang == "en" else " ", text)
+        text = text.replace(ch, f" {alone} " if lang == "en" else " ")
+    if lang == "en":
+        text = re.sub(r"\bw/o\b", "without", text, flags=re.I)
+        text = re.sub(r"\bw/(?=\s|$)", "with", text, flags=re.I)
 
     def wrap(w):
         return f" {w} " if spaced else w
@@ -370,8 +381,14 @@ def normalize(text, lang=None):
                   else (m.group(1) + _NUMBER_WORD[lang] if lang == "ko" else _NUMBER_WORD[lang] + m.group(1)), text)
 
     if lang == "en":
+        # 1980s -> nineteen eighties ; 2000s -> two thousands ; 1900s -> nineteen hundreds
+        def _year_s(m):
+            n = int(m.group(1))
+            words = "two thousand" if n == 2000 else en_year(n)
+            return wrap(words[:-1] + "ies" if words.endswith("y") else words + "s")
+        text = re.sub(r"\b((?:1[1-9]|20)\d0)'?s\b", _year_s, text)
         # 90s / '90s -> nineties ; 1st 2nd 3rd 4th -> first second third fourth
-        text = re.sub(r"(?<!\d)'?(\d0)s\b", lambda m: wrap(_EN_DECADES.get(int(m.group(1)), m.group(1) + "s")), text)
+        text = re.sub(r"(?<!\d)'?(\d0)'?s\b", lambda m: wrap(_EN_DECADES.get(int(m.group(1)), m.group(1) + "s")), text)
         text = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", lambda m: wrap(en_ordinal(int(m.group(1)))) if len(m.group(1)) < 13 else m.group(0), text, flags=re.I)
         # clock times 3:30 -> three thirty
         def _clock(m):

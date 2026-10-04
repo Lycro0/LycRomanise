@@ -30,15 +30,24 @@ import winsys
 from drawing import (OUTLINE_RGB, _draw_outline_only, _draw_outlined_text, _ease_out_cubic,
                      _lerp_rgb, _outline_offsets, _rgb_to_hex)
 from selftest import _selftest_report, run_selftest
-from lyrics_provider import fetch_lyrics
+from lyrics_provider import fetch_lyrics, is_non_song, outage_since
 from romanize import detect_script, needs_romanization, romanize_line
 from media_client import MediaClient
 import updater
-from textnorm import line_language, normalize
+import update_dialog
+from textnorm import normalize
 
 log = logging.getLogger("spoti.app")
 
 from version import __version__, RELEASES_URL
+
+
+def _safe(fn, *args):
+    """Call a dialog method that may run after the window was closed."""
+    try:
+        fn(*args)
+    except tk.TclError:
+        pass
 APP_NAME = "LycRomanise v%s" % __version__
 
 # --- polling ---------------------------------------------------------------
@@ -161,14 +170,16 @@ class LyricsApp:
 
         # --- current track / lyrics state
         self.current_track_id = None
+        self._lookup_lengths = {}        # track id -> track length (ms) its lyrics were looked up with
+        self._relookups = 0
+        self._relookup_busy = False
+        self._len_candidate = None
         self.track = None
         self.title_text = ""
         self.duration_s = 0.0
         self.lyrics_state = "none"     # none | pending | ready | missing
         self.lyrics = []               # [(timestamp_s, raw_text)]
-        self.line_words = None         # per-line [(start, end, text)] when the source had word timing
         self.norm_lines = []           # lyrics with numbers/symbols spelled out
-        self.norm_tokens = None
         self.song_hint = None          # 'ko' | 'ja' | 'zh' | ... for the song as a whole
         self.segments = []             # displayed lines (long lyric lines are split into several)
         self.seg_starts = []
@@ -224,6 +235,8 @@ class LyricsApp:
         self._connect_spotify()
         self._maybe_show_first_run_login()
         self._update_url = None
+        self._update_release = None
+        self._update_win = None
         if not os.environ.get("SPOTI_SELFTEST"):
             self._set_banner("LycRomanise v%s" % __version__, VERSION_BANNER_S)
             if config.check_updates_enabled():
@@ -720,8 +733,8 @@ class LyricsApp:
     def check_for_update(self, manual=True):
         """Ask GitHub for the latest release (background thread). Automatic on startup;
         tray > Check for updates does it on demand and always answers."""
-        if manual and self._update_url:
-            winsys.open_url(self._update_url)
+        if manual and self._update_release:
+            self._offer_update(self._update_release)
             return
 
         def work():
@@ -730,22 +743,93 @@ class LyricsApp:
         threading.Thread(target=work, daemon=True, name="update-check").start()
 
     def _update_checked(self, found, manual):
-        if found:
-            tag, url = found
-            self._update_url = url
-            text = "New version %s available: right-click the tray icon > Check for updates" % tag
-            show = lambda: self._set_banner(text, UPDATE_BANNER_S)
-        elif manual:
-            text = "You're on the latest version (v%s)" % updater.__version__
-            show = lambda: self._set_banner(text, 5.0)
-        else:
+        if not found:
+            if manual:
+                text = "You're on the latest version (v%s)" % updater.__version__
+                self._banner_after_current(lambda: self._set_banner(text, 5.0))
             return
-        if manual and found:
-            winsys.open_url(url)
+        self._update_release = found
+        self._update_url = found["url"]
+        if manual or updater.skipped_tag() != found["tag"]:
+            self._offer_update(found)
+        else:
+            log.info("update %s was skipped by the user", found["tag"])
+
+    def _banner_after_current(self, show):
         # Let the "LycRomanise v1.x.x" line finish its 5 s first, then show the result.
         b = self._active_banner()
         wait_ms = int(max(0.0, b["until"] - time.perf_counter()) * 1000) + 100 if b else 0
         self.root.after(wait_ms, show)
+
+    def _offer_update(self, release):
+        """The "update now?" window. Copies that can't update themselves (running from source, no
+        installer file on the release, read-only folder) get the old behaviour: the release page."""
+        if not updater.can_self_update(release):
+            text = "New version %s available: opening the download page" % release["tag"]
+            self._banner_after_current(lambda: self._set_banner(text, UPDATE_BANNER_S))
+            winsys.open_url(release["url"])
+            return
+        try:
+            if self._update_win is not None:
+                try:
+                    self._update_win.deiconify()
+                    self._update_win.lift()
+                    return
+                except tk.TclError:
+                    self._update_win = None
+            win = tk.Toplevel(self.root)
+            win.attributes("-topmost", True)
+            tag = release["tag"]
+            dlg = update_dialog.UpdateDialog(
+                win, tag, updater.__version__, release.get("notes"),
+                on_update=lambda: self._run_update(release, dlg),
+                on_later=lambda: self._close_update_win(),
+                on_skip=lambda: (updater.skip_version(tag), self._close_update_win()),
+                on_open_page=lambda: winsys.open_url(release["url"]))
+            win.protocol("WM_DELETE_WINDOW", self._close_update_win)
+            self._update_win = win
+            # centre on the screen the strip is on
+            win.update_idletasks()
+            x = max(0, (win.winfo_screenwidth() - win.winfo_reqwidth()) // 2)
+            y = max(0, (win.winfo_screenheight() - win.winfo_reqheight()) // 3)
+            win.geometry("+%d+%d" % (x, y))
+            win.focus_force()
+        except Exception:
+            log.exception("couldn't open the update window")
+            self._set_notice("Couldn't open the update window - see the log", "error", seconds=8)
+            winsys.open_url(release["url"])
+
+    def _close_update_win(self):
+        win, self._update_win = self._update_win, None
+        try:
+            if win is not None:
+                win.destroy()
+        except tk.TclError:
+            pass
+
+    def _run_update(self, release, dlg):
+        """Download on a worker thread, then install and quit."""
+        def work():
+            try:
+                path, kind = updater.download(
+                    release, progress=lambda d, t: self.post(lambda: _safe(dlg.progress, d, t)))
+            except RuntimeError as exc:
+                log.warning("update download failed: %s", exc)
+                self.post(lambda: _safe(dlg.failed, str(exc)))
+                return
+            except Exception:
+                log.exception("update download crashed")
+                self.post(lambda: _safe(dlg.failed, "Something went wrong while downloading the update."))
+                return
+            self.post(lambda: self._finish_update(path, kind, dlg))
+        threading.Thread(target=work, daemon=True, name="update-download").start()
+
+    def _finish_update(self, path, kind, dlg):
+        _safe(dlg.installing)
+        if updater.apply(path, kind):
+            self.root.after(900, self._quit)      # the installer / swap script takes over from here
+        else:
+            _safe(dlg.failed, "Couldn't start the installer. The file is in %s" % updater.UPDATE_DIR)
 
     def _open_logs_folder(self):
         try:
@@ -1049,7 +1133,14 @@ class LyricsApp:
             # while the lyrics are still being looked up.
             self._results.put(("track", status, track, received))
             if status == "ok" and track and track["id"] != known_track_id:
+                track = self._settle_length(spotify, track)
+                self._lookup_lengths = {track["id"]: track.get("duration_ms") or 0}
+                log.info("looking up lyrics for %r (track length %.0fs)", track["name"],
+                         (track.get("duration_ms") or 0) / 1000.0)
+                asked = time.monotonic()
                 result = fetch_lyrics(track["name"], track["artist"], track["album"], track["duration_ms"])
+                if not (result and result[0]) and outage_since(asked):
+                    result = self._retry_after_outage(track, result)
                 self._results.put(("lyrics", track["id"], result))
                 # Own thread: prefetching must never keep the poller busy, or the
                 # next song change would be noticed late.
@@ -1058,6 +1149,78 @@ class LyricsApp:
         except Exception:
             log.exception("poll worker error (recovering)")
             self._results.put(("track", "error", None, time.perf_counter()))
+
+    def _settle_length(self, spotify, track):
+        """Right after a skip Windows can report the previous song's length for a moment, and a
+        wrong length picks the wrong edition of the lyrics. Ask again until it changes."""
+        for _ in range(3):
+            if not track.get("duration_suspect"):
+                break
+            time.sleep(0.7)
+            status, fresh = spotify.poll()
+            if status != "ok" or not fresh or fresh["id"] != track["id"]:
+                break
+            track = fresh
+        return track
+
+    def _maybe_relookup(self, track):
+        """The song's length changed after its lyrics were looked up (a late correction from
+        Windows): look up again with the right length if it moved by more than 3 s."""
+        want = track.get("duration_ms") or 0
+        used = self._lookup_lengths.get(self.current_track_id)
+        if not want or not used or abs(want - used) <= 3000 or track.get("duration_suspect"):
+            self._len_candidate = None
+            return
+        if self._relookups >= 2 or self._relookup_busy or self.lyrics_state == "pending":
+            return
+        # Windows can report the next song's length a moment before its title: only act when the
+        # new length is still there, for the same song, on the next poll.
+        key = round(want / 1000.0)
+        if self._len_candidate is None or self._len_candidate[0] != key:
+            self._len_candidate = (key, 1)
+            return
+        self._len_candidate = None
+        tid, self._relookups, self._relookup_busy = self.current_track_id, self._relookups + 1, True
+        self._lookup_lengths = {tid: want}
+        log.info("track length is now %.0fs (was %.0fs when looked up): looking up lyrics again for %r",
+                 want / 1000.0, used / 1000.0, track["name"])
+
+        def work():
+            asked = time.monotonic()
+            try:
+                result = fetch_lyrics(track["name"], track["artist"], track["album"], want)
+            except Exception:
+                log.exception("lyrics re-lookup failed")
+                result = None
+            outage = not (result and result[0]) and outage_since(asked)
+            self.post(lambda: self._relookup_done(tid, result, outage))
+        threading.Thread(target=work, daemon=True, name="lyrics-relookup").start()
+
+    def _relookup_done(self, tid, result, outage):
+        self._relookup_busy = False
+        if outage or tid != self.current_track_id:
+            return          # the site was down (keep what we have) or the song changed
+        if result and result[0] and list(result[0]) == self.lyrics:
+            return          # same lyrics: nothing to redraw
+        self._handle_lyrics(tid, result)
+
+    RETRY_DELAYS_S = (15, 30, 60)
+
+    def _retry_after_outage(self, track, result):
+        """The lyrics site was down or rate-limiting (HTTP 503 while skipping songs quickly): "no
+        lyrics" would be wrong, so ask again a few times while this song is still playing."""
+        for delay in self.RETRY_DELAYS_S:
+            time.sleep(delay)
+            if self.current_track_id != track["id"]:
+                return result      # song changed: the new one does its own lookup
+            asked = time.monotonic()
+            log.info("retrying lyrics for %r after a lyrics-site outage", track["name"])
+            result = fetch_lyrics(track["name"], track["artist"], track["album"], track["duration_ms"])
+            if result and result[0]:
+                return result
+            if not outage_since(asked):
+                break              # the site answered normally: really not there
+        return result
 
     PREFETCH_COUNT = 3
 
@@ -1134,6 +1297,7 @@ class LyricsApp:
         self._last_poll_perf = received
         self._is_playing = bool(track["is_playing"])
         self.duration_s = (track.get("duration_ms") or 0) / 1000.0
+        self._maybe_relookup(track)
         if not was_playing and self._is_playing and not changed:
             self._anim_start_perf = None   # resumed: show the line in place, no slide
 
@@ -1146,7 +1310,7 @@ class LyricsApp:
         self.title_text = ""
         self.duration_s = 0.0
         self.lyrics_state = "none"
-        self.lyrics, self.line_words, self.norm_lines, self.norm_tokens = [], None, [], None
+        self.lyrics, self.norm_lines = [], []
         self.segments, self.seg_starts, self.line_infos = [], [], []
         self.current_index = -1
         self._anim_start_perf = None
@@ -1156,6 +1320,9 @@ class LyricsApp:
         self._reset_track_state()
         self.current_track_id = track["id"]
         self.track = track
+        self._relookups = 0
+        self._relookup_busy = False
+        self._len_candidate = None
         self.lyrics_state = "pending"
         self.title_text = self._make_title(track)
         self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
@@ -1163,8 +1330,8 @@ class LyricsApp:
     def _make_title(self, track):
         """'Artist - Song', with numbers/symbols spelled out and non-Latin
         text romanized."""
-        if not track:
-            return ""
+        if not track or is_non_song(track.get("name"), track.get("artist")):
+            return ""          # the Spotify DJ ("Up next" / DJ X) and ads get no title card
         artist = normalize(track.get("artist", ""))
         name = normalize(track.get("name", ""))
         text = f"{artist} - {name}" if artist and name else (artist or name)
@@ -1175,31 +1342,25 @@ class LyricsApp:
     def _handle_lyrics(self, track_id, result):
         if track_id != self.current_track_id:
             return   # the song changed while we were fetching
-        synced = words = None
+        synced = None
         if result:
-            synced, _plain, words = result
+            synced, _plain = result
         if not synced:
             self.lyrics_state = "missing"
             self.lyrics, self.segments = [], []
             return
 
         self.lyrics = list(synced)
-        self.line_words = words if words and len(words) == len(synced) else None
         # Numbers and symbols -> the words a singer would say, before anything
         # else (romanizing, splitting) sees the text.
         self.norm_lines = [normalize(text) for _ts, text in self.lyrics]
-        self.norm_tokens = None
-        if self.line_words:
-            self.norm_tokens = [
-                [(s, e, normalize(t, lang=line_language(self.lyrics[i][1]))) for s, e, t in line]
-                for i, line in enumerate(self.line_words)
-            ]
         self.song_hint = detect_script(" ".join(self.norm_lines))
 
         self.lyrics_state = "ready"
         self._rebuild_segments()
-        log.info("lyrics ready: %d lines, first at %.1fs, %d displayed segments, song position %.1fs",
-                 len(self.lyrics), self.lyrics[0][0], len(self.segments), self._raw_position_s())
+        log.info("lyrics ready: %d lines, first at %.1fs, %d displayed segments, song position %.1fs; "
+                 "first line %r, last at %.0fs", len(self.lyrics), self.lyrics[0][0], len(self.segments),
+                 self._raw_position_s(), self.lyrics[0][1][:40], self.lyrics[-1][0])
 
     # ---------------------------------------------------- segments / layout --
 
@@ -1219,18 +1380,9 @@ class LyricsApp:
             return 42
 
     def _line_display(self, i):
-        """(text as displayed, per-word timing or None) for lyric line i under
-        romanization (always on)."""
+        """Text of lyric line i as displayed (romanized when it needs it)."""
         norm = self.norm_lines[i]
-        rom = needs_romanization(norm)
-        text = romanize_line(norm, self.song_hint) if rom else norm
-        words = None
-        if self.norm_tokens is not None and text.strip():
-            words = []
-            for s, e, t in self.norm_tokens[i]:
-                shown = romanize_line(t, self.song_hint) if rom else t
-                words.append((s, e, max(1, len(shown))))
-        return text, words
+        return romanize_line(norm, self.song_hint) if needs_romanization(norm) else norm
 
     def _rebuild_segments(self):
         """Recompute the displayed lines (called when the lyrics arrive or a
@@ -1502,7 +1654,9 @@ class LyricsApp:
             self._desktop_next_font, next_text, self.desktop_next_size,
             DESKTOP_NEXT_MIN_SIZE, max_text_width,
         )
-        fraction = 0.0 if kind == "title" else self._current_fill_fraction()
+        # The title card is drawn entirely in the "sung" colour (pink). A fraction of 0 would leave
+        # its first character or two mid-gradient while the rest is yellow.
+        fraction = 1.0 if kind == "title" else self._current_fill_fraction()
 
         # The finished line is simply gone the instant the next one starts:
         # fading toward black over a chroma-key window just leaves a dark
@@ -1596,12 +1750,6 @@ def main():
         dpi = winsys.enable_dpi_awareness()  # before the first Tk window, or it has no effect
     if dpi:
         log.info("DPI awareness: %s", dpi)
-    try:
-        import netease_crypto
-        log.info("NetEase word timing: %s", "cryptography available" if netease_crypto.available()
-                 else "unavailable (cryptography missing: %s)" % netease_crypto.IMPORT_ERROR)
-    except Exception:
-        log.warning("couldn't check the cryptography package", exc_info=True)
     root = tk.Tk()
     application = None
     try:

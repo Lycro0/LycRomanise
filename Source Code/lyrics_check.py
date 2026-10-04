@@ -1,27 +1,20 @@
-"""Cross-check the lyrics the three sources returned and pick the right ones.
+"""Sanity-check the lyrics a source returned before they are shown.
 
-Why this exists: a source can answer with something that *looks* like lyrics
-but is not the song's words - the "pure music, please enjoy" placeholder QQ
-and NetEase show for instrumentals (a search for "House of Cards (Full Length
-Edition)" can land on such an entry), a Chinese translation instead of the
-original, or the lyrics of another edition. Romanized, those come out as
-pinyin for a Korean or English song.
+Why this exists: a lookup can answer with something that *looks* like lyrics but is
+not the song's words: a "no lyrics / pure music" placeholder, a Chinese translation
+instead of the original, or the lyrics of a longer edition. Romanized, those come out
+as pinyin for a Korean or English song. Showing nothing beats showing the wrong song.
 
 Everything here is pure (no network, no GUI) so it can be tested directly.
-Decisions are returned as notes and logged by the caller to the log file.
+Decisions are returned as notes and logged by the caller.
 
-The rules, in order:
+The checks, in order:
   1. Placeholders ("纯音乐，请欣赏", "instrumental", ...) are thrown away.
-  2. Lyrics whose script does not fit the other sources (Chinese lines next
-     to Korean or English ones) are thrown away when the sources can be
-     compared; if only one source is left there is nothing to compare with.
-  3. Lyrics that run well past the end of the song are thrown away when a
-     source that fits exists.
-  4. Of three sources, one that shares no wording with two that agree with each
-     other is thrown away (a different song or edition).
-  5. The first survivor in the caller's preference order wins. Bilingual lines
-     (original + translation stamped at the same time) are cut down to the
-     song's own language.
+  2. Lyrics that run well past the end of the song are thrown away (another edition).
+  3. Chinese-only lyrics for a song whose title/artist are Korean or Japanese, or English
+     lyrics for a title marked as the Chinese edition, are thrown away (a translation).
+  4. Bilingual lines (original + translation stamped at the same time) are cut down to
+     the song's own language.
 """
 
 import logging
@@ -41,24 +34,15 @@ PLACEHOLDER_RE = re.compile(
 # How far past the song's own length the last lyric line may start before the
 # lyrics are treated as belonging to a longer edition.
 OVERRUN_S = 8.0
-# Word/character overlap (0..1) above which two lyric sets count as "the same words".
-SAME_WORDS = 0.35
 # A script counts as "present" in a song when at least this share of its lines use it.
 PRESENT_SHARE = 0.25
 
-# When the sources are split and nothing else decides: prefer the language a
-# song is most likely to be *originally* in over its translations (Chinese
-# translations are by far the commonest wrong match for Korean, Japanese and
-# English songs).
-ORIGINAL_ORDER = ("ko", "ja", "latin", "ru", "el", "he", "ar", "hi", "zh")
-
-
 class Candidate:
-    """Lyrics from one source."""
-    __slots__ = ("name", "synced", "plain", "words", "profile", "main")
+    """The lyrics under test."""
+    __slots__ = ("synced", "profile", "main")
 
-    def __init__(self, name, synced, plain=None, words=None):
-        self.name, self.synced, self.plain, self.words = name, synced, plain, words
+    def __init__(self, synced):
+        self.synced = synced
         self.profile = script_profile(synced)
         self.main = main_script(self.profile)
 
@@ -100,35 +84,6 @@ def is_placeholder(synced):
     return len(lines) <= 4 or hits / len(lines) >= 0.5
 
 
-def _tokens(synced):
-    """Words (or, for Chinese/Japanese, character pairs) to compare wording with."""
-    text = " ".join(t for _ts, t in synced or []).casefold()
-    text = re.sub(r"[^\w\s]", " ", text)
-    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", text):
-        chars = re.sub(r"\s+", "", text)
-        return {chars[i:i + 2] for i in range(len(chars) - 1)}
-    return set(text.split())
-
-
-def similarity(a, b):
-    """Jaccard overlap (0..1) of the wording of two lyric sets."""
-    ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-def compatible(a, b):
-    """Could these two be the same song's lyrics as far as script goes? Yes if
-    their main scripts match, or one's main script is a real part of the other
-    (a K-pop song whose English lines make one source look mostly English)."""
-    if not a.main or not b.main:
-        return True
-    if a.main == b.main:
-        return True
-    return (b.profile.get(a.main, 0) >= PRESENT_SHARE) or (a.profile.get(b.main, 0) >= PRESENT_SHARE)
-
-
 def _overruns(c, duration_ms):
     if not duration_ms or not c.synced:
         return False
@@ -149,7 +104,7 @@ def _title_script(title, artist):
 
 
 def _wrong_script(c, title, artist):
-    """For a lone source: the reason its lyrics are probably a translation, or None. Only
+    """The reason its lyrics are probably a translation, or None. Only
     the clear case counts - the song's title/artist are Korean or Japanese but the lyrics
     are (almost) all Chinese, the typical Chinese-translation mismatch. English titles
     are never judged (plenty of Mandarin songs have them)."""
@@ -162,13 +117,12 @@ def _wrong_script(c, title, artist):
     return None
 
 
-def strip_translation_lines(synced, words, keep_script):
+def strip_translation_lines(synced, keep_script):
     """Remove translation lines from a bilingual LRC: lines stamped at (almost)
     the same time in different scripts are the original plus its translation,
-    so keep the one in `keep_script`. Returns (synced, words, removed_count);
-    `words` stays parallel to `synced` (None stays None)."""
+    so keep the one in `keep_script`. Returns (synced, removed_count)."""
     if not synced:
-        return synced, words, 0
+        return synced, 0
     drop = set()
     i, n = 0, len(synced)
     while i < n:
@@ -184,108 +138,29 @@ def strip_translation_lines(synced, words, keep_script):
                 drop.update(k for k in group if k not in keep and scripts[k] is not None)
         i = j
     if not drop:
-        return synced, words, 0
-    kept_s = [x for k, x in enumerate(synced) if k not in drop]
-    kept_w = [x for k, x in enumerate(words) if k not in drop] if words and len(words) == len(synced) else words
-    return kept_s, kept_w, len(drop)
+        return synced, 0
+    return [x for k, x in enumerate(synced) if k not in drop], len(drop)
 
 
-def choose(results, order, title="", artist="", duration_ms=None):
-    """Pick the lyrics to show.
-
-    results  {source name: (synced, plain, words)} for sources that had lyrics
-    order    source names, most preferred first
-    Returns (Candidate or None, [notes explaining every rejection]).
-    """
+def check(synced, plain, title="", artist="", duration_ms=None):
+    """Judge one source's lyrics. Returns (synced, plain, notes): the lyrics to use (bilingual
+    translation lines removed), or (None, None, notes) when they should not be shown. `notes`
+    explain every rejection for the log."""
     notes = []
-    cands = []
-    for name in order:
-        res = results.get(name)
-        if not res or not res[0]:
-            continue
-        synced, plain, words = (tuple(res) + (None, None))[:3]
-        if is_placeholder(synced):
-            notes.append("%s: only a 'no lyrics / pure music' placeholder (%r) - ignored"
-                         % (name, synced[0][1][:40] if synced else ""))
-            continue
-        cands.append(Candidate(name, synced, plain, words))
-    if not cands:
-        return None, notes
-    if len(cands) == 1:
-        c = cands[0]
-        # Nothing to compare with, but two checks need no second source.
-        if _overruns(c, duration_ms):
-            notes.append("%s: only source, but its last line is at %.0fs and the song is %.0fs long - "
-                         "another edition, ignored" % (c.name, c.synced[-1][0], duration_ms / 1000))
-            return None, notes
-        why = _wrong_script(c, title, artist)
-        if why:
-            notes.append("%s: only source, but %s - ignored" % (c.name, why))
-            return None, notes
-        notes.append("%s: only source with usable lyrics, nothing to cross-check against" % c.name)
-        return _finish(c, notes), notes
-
-    # 2. script must fit the other sources. A source's support = itself + the
-    # sources it is compatible with; the best-supported script wins, and ties
-    # go to the song's own script (from title/artist) then the original-language order.
-    hint = _title_script(title, artist)
-
-    def rank(c):
-        if hint and c.main == hint:
-            return -1
-        return ORIGINAL_ORDER.index(c.main) if c.main in ORIGINAL_ORDER else len(ORIGINAL_ORDER)
-
-    support = {c.name: 1 + sum(1 for o in cands if o is not c and compatible(c, o)) for c in cands}
-    best = max(support.values())
-    leaders = [c for c in cands if support[c.name] == best]
-    lead = min(leaders, key=lambda c: (rank(c), order.index(c.name)))
-    kept = []
-    for c in cands:
-        if c is lead or compatible(c, lead):
-            kept.append(c)
-        else:
-            notes.append("%s: lyrics are mostly %s but %s reads as %s - looks like a translation or another "
-                         "song, ignored" % (c.name, c.main, lead.name, lead.main))
-    cands = kept
-
-    # 3. lyrics longer than the song
-    fits = [c for c in cands if not _overruns(c, duration_ms)]
-    if fits and len(fits) < len(cands):
-        for c in cands:
-            if c not in fits:
-                notes.append("%s: last line at %.0fs but the song is %.0fs long - another edition, ignored"
-                             % (c.name, c.synced[-1][0], duration_ms / 1000))
-        cands = fits
-
-    # 4. with three left, drop one that shares no wording with two that agree
-    if len(cands) >= 3:
-        agree = {c.name: [o.name for o in cands if o is not c and similarity(c.synced, o.synced) >= SAME_WORDS]
-                 for c in cands}
-        odd = [c for c in cands if not agree[c.name]]
-        pair = [c for c in cands if agree[c.name]]
-        if len(odd) == 1 and len(pair) == len(cands) - 1:
-            notes.append("%s: wording differs from the other sources, which agree with each other - ignored"
-                         % odd[0].name)
-            cands = pair
-    elif len(cands) == 2:
-        sim = similarity(cands[0].synced, cands[1].synced)
-        if sim < 0.2:
-            notes.append("%s and %s disagree on the wording (overlap %.0f%%) and there is no third source "
-                         "to settle it; using %s by preference" % (cands[0].name, cands[1].name, sim * 100,
-                                                                    min(cands, key=lambda c: order.index(c.name)).name))
-
-    # 5. preferred survivor
-    win = min(cands, key=lambda c: order.index(c.name))
-    if len(cands) > 1:
-        notes.append("%s: agreed with %s, chosen by source preference" % (win.name, ", ".join(
-            o.name for o in cands if o is not win)))
-    return _finish(win, notes), notes
-
-
-def _finish(c, notes):
-    """Apply the bilingual clean-up to the winner."""
-    synced, words, removed = strip_translation_lines(c.synced, c.words, c.main)
+    if not synced or is_placeholder(synced):
+        notes.append("only a 'no lyrics / pure music' placeholder (%r) - ignored"
+                     % (synced[0][1][:40] if synced else ""))
+        return None, None, notes
+    c = Candidate(synced)
+    if _overruns(c, duration_ms):
+        notes.append("last line is at %.0fs and the song is %.0fs long - another edition, ignored"
+                     % (c.synced[-1][0], duration_ms / 1000))
+        return None, None, notes
+    why = _wrong_script(c, title, artist)
+    if why:
+        notes.append("%s - ignored" % why)
+        return None, None, notes
+    kept, removed = strip_translation_lines(c.synced, c.main)
     if removed:
-        notes.append("%s: removed %d translation line(s) that shared a timestamp with the original" % (c.name, removed))
-        c = Candidate(c.name, synced, c.plain, words)
-    return c
+        notes.append("removed %d translation line(s) that shared a timestamp with the original" % removed)
+    return kept, plain, notes

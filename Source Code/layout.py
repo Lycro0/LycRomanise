@@ -29,10 +29,10 @@ class Seg:
 
 class LineInfo:
     """Timing data for one original lyric line."""
-    __slots__ = ("ts", "text", "words", "span")
+    __slots__ = ("ts", "text", "span")
 
-    def __init__(self, ts, text, words, span):
-        self.ts, self.text, self.words, self.span = ts, text, words, span
+    def __init__(self, ts, text, span):
+        self.ts, self.text, self.span = ts, text, span
 
 def split_display(text, max_chars):
     """Cut `text` into balanced chunks of at most ~max_chars, at spaces.
@@ -85,37 +85,8 @@ def split_display(text, max_chars):
         out.append((piece, start / total, 1.0 if idx == len(final) - 1 else pos / total))
     return out
 
-def fraction_from_words(segs, position):
-    """Fill fraction from real per-word timings [(start, end, char_count)]:
-    linear through a word's characters while it is sung, held between words."""
-    total = sum(c for _, _, c in segs)
-    if total <= 0 or not segs:
-        return 1.0
-    done = 0
-    for start, end, count in segs:
-        if position < start:
-            return done / total
-        if position < end:
-            span = max(1e-6, end - start)
-            return (done + count * (position - start) / span) / total
-        done += count
-    return 1.0
-
-def time_at_fraction(segs, fraction):
-    """Inverse of fraction_from_words: when does the fill reach `fraction`?"""
-    total = sum(c for _, _, c in segs)
-    target = fraction * total
-    done = 0
-    for start, end, count in segs:
-        if done + count >= target:
-            return start + (end - start) * ((target - done) / count if count else 0)
-        done += count
-    return segs[-1][1]
-
 def line_fraction(info, position):
     """How much of the original line has been sung at `position` (0..1)."""
-    if info.words:
-        return fraction_from_words(info.words, position)
     if info.span <= 0:
         return 1.0
     return max(0.0, min(1.0, (position - info.ts) / info.span))
@@ -129,16 +100,15 @@ def seg_fraction(seg, info, position):
     return max(0.0, min(1.0, (lf - seg.f0) / width))
 
 def build_segments(lines, displays, max_chars, last_span, chars_per_second, min_fill):
-    """lines: [(ts, raw_text)]; displays: [(text, words_or_None)] per line
-    (the text as it will be shown, and per-word [(start, end, chars)] timing
-    if the source had it). Returns (segments, line_infos)."""
+    """lines: [(ts, raw_text)]; displays: the text as it will be shown, one per
+    line. Returns (segments, line_infos)."""
     segs, infos = [], []
     n = len(lines)
     for i, (ts, _raw) in enumerate(lines):
-        text, words = displays[i]
+        text = displays[i]
         avail = (lines[i + 1][0] - ts) if i + 1 < n else last_span
         est = max(min_fill, len(text) / chars_per_second)
-        info = LineInfo(ts, text, words, max(0.05, min(avail, est)))
+        info = LineInfo(ts, text, max(0.05, min(avail, est)))
         infos.append(info)
 
         next_ts = lines[i + 1][0] if i + 1 < n else None
@@ -147,7 +117,7 @@ def build_segments(lines, displays, max_chars, last_span, chars_per_second, min_
             if k == 0:
                 start = ts
             else:
-                start = time_at_fraction(words, f0) if words else ts + f0 * info.span
+                start = ts + f0 * info.span
                 if next_ts is not None:
                     start = min(start, next_ts - 0.05)
             start = max(start, floor)

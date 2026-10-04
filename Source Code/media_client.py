@@ -50,7 +50,9 @@ def smtc_available():
 
 def _track_dict(title, artist, album, duration_ms, progress_ms, is_playing):
     return {
-        "id": "%s|%s|%d" % (artist, title, round(duration_ms / 1000)),
+        # Not the length: Windows reports a song's length late and in steps right after a skip,
+        # and a changing id would restart the lyrics lookup each time it moved.
+        "id": "%s|%s" % (artist, title),
         "name": title,
         "artist": artist,
         "album": album,
@@ -82,6 +84,13 @@ class MediaClient:
         self._manager = None
         self._smtc_failures = 0
         self._smtc_ok_once = False
+        # Length bookkeeping: right after a skip Windows can still report the previous song's length.
+        self._len_key = None            # (artist, title) being watched
+        self._len_prev_ms = 0           # last length seen for the song before it
+        self._len_last_ms = 0           # latest length seen for the current song
+        self._len_first_ms = 0          # first length reported for this song
+        self._len_seen_at = 0.0
+        self._len_settled = True        # True once the length moved off the first/stale figure
         # window-title fallback state
         self._title_key = None
         self._title_started = 0.0
@@ -176,7 +185,25 @@ class MediaClient:
                 pass
         if duration_ms:
             position_ms = min(position_ms, duration_ms)
-        return ("ok", _track_dict(title, artist, album, int(duration_ms), position_ms, is_playing))
+        track = _track_dict(title, artist, album, int(duration_ms), position_ms, is_playing)
+        track["duration_suspect"] = self._length_is_suspect(artist, title, duration_ms)
+        return ("ok", track)
+
+    def _length_is_suspect(self, artist, title, duration_ms):
+        """True while a new song's length is still the previous song's (Windows hasn't updated it
+        yet). The app waits a moment before looking up lyrics by length."""
+        now = time.monotonic()
+        key = (artist, title)
+        if key != self._len_key:
+            self._len_prev_ms = self._len_last_ms if self._len_key else 0
+            self._len_key, self._len_first_ms, self._len_seen_at = key, duration_ms, now
+            self._len_settled = False
+        elif not self._len_settled and abs(duration_ms - self._len_first_ms) > 1500:
+            self._len_settled = True        # the figure changed: the real one has arrived
+        self._len_last_ms = duration_ms
+        if self._len_settled or not duration_ms or not self._len_prev_ms or now - self._len_seen_at > 8.0:
+            return False
+        return abs(duration_ms - self._len_prev_ms) <= 1500
 
     # --------------------------------------------------------- window title --
 
