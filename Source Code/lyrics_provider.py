@@ -49,7 +49,7 @@ CACHE_PATH = os.path.join(_APP_DIR, "lyrics_cache.json")
 CACHE_MAX_ENTRIES = 300
 # Bump when the way lyrics are chosen changes: older cache entries are then ignored and
 # looked up again.
-CACHE_VERSION = 8   # 8: automatic Korean-first language tie-break; 7: language-edition tie-break; 6: lookups made with a stale song length are dropped; 5: LRCLIB only, no word timing (v1.2.0); 4: cleaned-title retries; 3: language tags
+CACHE_VERSION = 9   # 9: no language preference, exact-length entries skip the overrun check; 8: Korean-first tie-break (removed); 7: language-edition tie-break; 6: lookups made with a stale song length are dropped; 5: LRCLIB only, no word timing (v1.2.0); 4: cleaned-title retries; 3: language tags
 
 # --- provider health -------------------------------------------------------------
 # A source that keeps failing at the network level (timeouts, HTTP 5xx/403/429) is
@@ -247,13 +247,11 @@ def _split_artists(artist_name):
 
 
 # --- which language edition of the lyrics ------------------------------------------------
-# LRCLIB often holds several entries with the same title, artist and length that are different
-# language versions (e.g. Korean and Japanese versions of a K-pop song, both just titled
-# "Every Night (Version 2)"). Nothing in the title tells them apart, so the tie is broken
-# automatically, with no setting: a title/artist/album written in Japanese/Korean/Chinese prefers
-# that language; a title that names a language edition ("Japanese Ver.") prefers that edition;
-# otherwise the original-language entry (Korean) beats translated editions (Japanese/Chinese/English).
-# If only the other language exists it is still used, so no song loses its lyrics.
+# LRCLIB can hold several language versions with the same title, artist and length. Only explicit
+# signals are used to choose between them: a title/artist/album written in Japanese/Korean/Chinese,
+# or a title naming an edition ("Japanese Ver."). With no such signal there is no preference, and
+# any language is accepted.
+_tl = threading.local()     # length of the LRCLIB entry that was matched, for the lyrics check
 
 
 def lyrics_script(synced):
@@ -266,11 +264,11 @@ def lyrics_script(synced):
 
 
 def preferred_script(title="", artist="", album=""):
-    """The language edition to prefer when entries tie."""
+    """The language edition to prefer when entries tie, or None for no preference."""
     own = detect_script("%s %s %s" % (title, artist, album))
     if own:
         return own
-    return language_tag(title) or "ko"
+    return language_tag(title)
 
 
 def _pick_candidate(source, cands, title, artist, duration_ms, want_script=None):
@@ -415,8 +413,8 @@ def _lrclib_search(params):
 
 def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=None):
     """Exact lookup first, then searches that retry with a cleaned title / first artist only /
-    a free-text query, always ranked by _pick_candidate. When several entries tie, the Korean
-    (original-language) edition wins (see preferred_script)."""
+    a free-text query, always ranked by _pick_candidate. When several entries tie, the
+    edition in the title/artist's own language wins, if any (see preferred_script)."""
     started = time.monotonic()
     variants = _lrclib_variants(track_name, artist_name)
     secs = round(duration_ms / 1000) if duration_ms else None
@@ -438,6 +436,7 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
                 fallback = data
                 log.info("lrclib: that entry is in %s but %s is preferred: checking for another edition", got, want)
                 break
+            _tl.match_dur_ms = int((data.get("duration") or 0) * 1000)
             return parse_lrc(data["syncedLyrics"]), data.get("plainLyrics")
     # Exact match failed (duration off by more than 2s, other album, ...): searches, loosest last.
     queries = [{"track_name": t, "artist_name": a} for t, a in variants]
@@ -454,11 +453,14 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
         song = _pick_candidate("lrclib", cands, track_name, artist_name, duration_ms, want) if cands else None
         if song:
             if not want or lyrics_script(song["_r"]["syncedLyrics"]) == want:
+                _tl.match_dur_ms = song["dur_ms"]
                 return parse_lrc(song["_r"]["syncedLyrics"]), song["_r"].get("plainLyrics")
             best = song     # right song, other language: keep looking in the remaining queries
     if best is None and fallback is not None:
+        _tl.match_dur_ms = int((fallback.get("duration") or 0) * 1000)
         return parse_lrc(fallback["syncedLyrics"]), fallback.get("plainLyrics")
     if best is not None:
+        _tl.match_dur_ms = best["dur_ms"]
         return parse_lrc(best["_r"]["syncedLyrics"]), best["_r"].get("plainLyrics")
     log.info("lrclib: no synced lyrics for %r - %r", track_name, artist_name)
     return None, None
@@ -559,6 +561,7 @@ def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
             _last_outage = time.monotonic()
             log.info("source %s is paused after repeated failures, not asked for %r", name, track_name)
             continue
+        _tl.match_dur_ms = None
         try:
             synced, plain = lookup(track_name, artist_name, album_name, duration_ms)
         except Exception as exc:     # one broken source must never take the app down
@@ -567,7 +570,12 @@ def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
         if not synced:
             log.info("source %s: no synced lyrics for %r", name, track_name)
             continue
-        synced, plain, notes = lyrics_check.check(synced, plain, track_name, artist_name, duration_ms)
+        # An entry whose own length matches the song is the right edition even if its last
+        # timestamp runs a few seconds long, so the "runs past the end" check is skipped for it.
+        md = getattr(_tl, "match_dur_ms", None)
+        trusted = bool(md and duration_ms and abs(md - duration_ms) <= 3000)
+        synced, plain, notes = lyrics_check.check(synced, plain, track_name, artist_name,
+                                                  None if trusted else duration_ms)
         for note in notes:
             log.info("check %r (%s): %s", track_name, name, note)
         if not synced:

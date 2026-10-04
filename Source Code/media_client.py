@@ -1,7 +1,5 @@
-"""Finds out what Spotify or Apple Music is playing WITHOUT the Spotify Web API (no login, no
-Client ID, no rate limit).
-
-It asks Windows instead. The Spotify desktop app publishes the current song to the
+"""Finds out what Spotify or Apple Music is playing by asking Windows (no login, no account, no
+rate limit). The Spotify desktop app publishes the current song to the
 Windows media controls (the volume-flyout / lock-screen player, "SMTC"): title,
 artist, album, length, position and play/pause state. That is read locally.
 
@@ -9,8 +7,6 @@ If that isn't available (the `winrt` packages are missing, or Windows has no Spo
 media session), it falls back to reading the Spotify window title ("Artist - Song").
 The title has no length or position, so the position is counted from when the song
 was first seen. Lyrics still work, but the timing can be a bit off after a seek.
-
-Same interface as SpotifyClient.poll() so the rest of the app doesn't change.
 """
 
 import asyncio
@@ -75,10 +71,7 @@ def _td_ms(value):
 
 
 class MediaClient:
-    """poll() -> (status, track) exactly like SpotifyClient.poll():
-    ("ok", track) / ("idle", None) / ("error", None)."""
-
-    last_auth_status = None          # unused; kept so the app's checks still work
+    """poll() -> ("ok", track) / ("idle", None) / ("error", None)."""
 
     def __init__(self):
         self._manager = None
@@ -120,10 +113,6 @@ class MediaClient:
     def get_current_track(self):
         status, track = self.poll()
         return track if status == "ok" else None
-
-    def get_upcoming_tracks(self, n=2):
-        """Windows doesn't expose the queue, so there is nothing to prefetch."""
-        return []
 
     def get_next_track(self):
         return None

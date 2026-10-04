@@ -1,4 +1,4 @@
-"""Lyricify Korean — appearance settings editor.
+"""LycRomanise — appearance settings editor.
 
 A small standalone GUI for changing how the Desktop Lyrics strip looks:
 the karaoke colors, the dim "next line" color, font sizes, and the strip's
@@ -14,10 +14,8 @@ so there is no Save-and-restart step.
 
 import logging
 import os
-import re
 import sys
 import tkinter as tk
-import webbrowser
 from tkinter import colorchooser, messagebox
 
 import config
@@ -113,229 +111,10 @@ class SizeRow(tk.Frame):
         return self.last_good
 
 
-DASHBOARD_URL = "https://developer.spotify.com/dashboard"
-REDIRECT_URI = "http://127.0.0.1:8888/callback"
-LINK_FG = "#4da3ff"
-
-
-def open_url(url):
-    """Open a web page in the default browser (never raises)."""
-    try:
-        webbrowser.open(url)
-    except Exception:
-        log.warning("couldn't open %s", url, exc_info=True)
-
-
-def rich_label(parent, parts, chars=46, fg=FG_DIM, font=("Segoe UI", 9)):
-    """Wrapped text with clickable links inside it. parts = [(text, url_or_None), ...]."""
-    total = sum(len(t) for t, _u in parts)
-    t = tk.Text(parent, wrap="word", width=chars, height=max(2, total // chars + 2), bg=BG, fg=fg,
-                relief="flat", borderwidth=0, highlightthickness=0, font=font, cursor="arrow",
-                padx=0, pady=0, takefocus=0)
-    for i, (text, url) in enumerate(parts):
-        if url:
-            tag = "link%d" % i
-            t.insert("end", text, tag)
-            t.tag_configure(tag, foreground=LINK_FG, underline=True)
-            t.tag_bind(tag, "<Button-1>", lambda _e, u=url: open_url(u))
-            t.tag_bind(tag, "<Enter>", lambda _e: t.configure(cursor="hand2"))
-            t.tag_bind(tag, "<Leave>", lambda _e: t.configure(cursor="arrow"))
-        else:
-            t.insert("end", text)
-    t.configure(state="disabled")
-
-    def fit(_event=None):
-        try:
-            lines = t.count("1.0", "end", "displaylines")
-            if lines:
-                t.configure(height=max(1, int(lines[0])))
-        except Exception:
-            pass    # keep the estimated height
-    t.bind("<Configure>", fit)
-    return t
-
-
-class SpotifyPanel:
-    """The Spotify login button + the advanced "use your own app" fields. Used inside Settings
-    and in the first-launch login window. `on_logged_in` is called once when a login appears."""
-
-    def __init__(self, parent, on_credentials=None, on_login=None, on_logout=None, on_logged_in=None):
-        self.parent = parent
-        self.on_credentials, self.on_login, self.on_logout = on_credentials, on_login, on_logout
-        self.on_logged_in = on_logged_in
-        self._was_logged_in = config.logged_in()
-
-        lrow = tk.Frame(parent, bg=BG)
-        lrow.pack(fill="x", pady=(0, 8))
-        self.login_var = tk.StringVar(value="Logged in" if self._was_logged_in else "Not logged in")
-        tk.Button(lrow, text="Log in with Spotify", command=self._do_login, bg=ACCENT, fg="#0d0d0d",
-                  activebackground=ACCENT, font=("Segoe UI", 10, "bold"), relief="flat",
-                  padx=10, pady=4, cursor="hand2").pack(side="left")
-        tk.Button(lrow, text="Log out", command=self._do_logout, bg=FIELD_BG, fg=FG,
-                  relief="flat", padx=10, pady=4, cursor="hand2").pack(side="left", padx=6)
-        tk.Label(lrow, textvariable=self.login_var, fg=FG_DIM, bg=BG, font=("Segoe UI", 9)).pack(side="left", padx=6)
-
-        rich_label(parent, [
-            ("Advanced (optional): use your own Spotify app instead. Create one in the ", None),
-            ("Spotify Developer Dashboard", DASHBOARD_URL),
-            (" (add the redirect URI %s), then paste its Client ID below. Leave the secret empty "
-             "for a normal login, clear both fields to go back to the default." % REDIRECT_URI, None),
-        ]).pack(anchor="w", fill="x")
-
-        self.cid_var = tk.StringVar(value="")
-        self.secret_var = tk.StringVar(value="")
-        self.status_var = tk.StringVar(value="")
-        try:
-            saved_id, saved_secret = config.load_saved_credentials()
-        except Exception:
-            saved_id = saved_secret = None
-            self.status_var.set("config.json couldn't be read; saving will replace it.")
-        self.cid_var.set(saved_id or "")
-        self.secret_var.set(saved_secret or "")
-
-        for label, var, show in (("Client ID", self.cid_var, ""), ("Client secret", self.secret_var, "\u2022")):
-            row = tk.Frame(parent, bg=BG)
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, fg=FG_DIM, bg=BG, font=("Segoe UI", 10), width=16, anchor="w").pack(side="left")
-            entry = tk.Entry(row, textvariable=var, show=show, width=34, bg=FIELD_BG, fg=FG,
-                             insertbackground=FG, relief="flat", font=("Consolas", 10))
-            entry.pack(side="left", fill="x", expand=True)
-            if show:
-                self.secret_entry = entry
-        self.show_secret_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            parent, text="Show secret", variable=self.show_secret_var, command=self._toggle_secret,
-            fg=FG_DIM, bg=BG, selectcolor=FIELD_BG, activebackground=BG, activeforeground=FG,
-            font=("Segoe UI", 9), anchor="w",
-        ).pack(anchor="w")
-        if config.env_overrides_credentials():
-            tk.Label(
-                parent, text="The environment variables SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET are set "
-                             "and take priority over what is saved here.",
-                fg="#ff8a8a", bg=BG, font=("Segoe UI", 9), wraplength=340, justify="left", anchor="w",
-            ).pack(anchor="w", pady=(2, 0))
-        row = tk.Frame(parent, bg=BG)
-        row.pack(fill="x", pady=(6, 0))
-        tk.Button(
-            row, text="Save & connect", command=self.save_credentials, bg=ACCENT, fg="#0d0d0d",
-            activebackground=ACCENT, font=("Segoe UI", 10, "bold"), relief="flat",
-            padx=10, pady=4, cursor="hand2",
-        ).pack(side="left")
-        tk.Label(row, textvariable=self.status_var, fg=FG_DIM, bg=BG, font=("Segoe UI", 9),
-                 wraplength=220, justify="left", anchor="w").pack(side="left", padx=10)
-        self._watch()
-
-    def _watch(self):
-        """Keep the Logged in / Not logged in label true (the login finishes in the browser)."""
-        try:
-            now = config.logged_in()
-            if now != self._was_logged_in:
-                self._was_logged_in = now
-                self.login_var.set("Logged in" if now else "Not logged in")
-                if now and self.on_logged_in:
-                    self.on_logged_in()
-            self.parent.after(1000, self._watch)
-        except tk.TclError:
-            pass    # the window was closed
-
-    def _do_login(self):
-        """If an app ID was typed in, save it first; then start the browser login. With no app
-        ID anywhere, say so (and point at the advanced fields) instead of doing nothing."""
-        cid = self.cid_var.get().strip()
-        if cid and not self.save_credentials(connect=False):
-            return
-        try:
-            has_id = bool(config.load_credentials()[0])
-        except Exception:
-            has_id = False
-        if not has_id:
-            self.status_var.set("No Client ID yet, so there is nothing to log in with. I opened the Spotify "
-                                "Developer Dashboard: create an app, add the redirect URI shown above, "
-                                "paste its Client ID here and press Save & connect.")
-            open_url(DASHBOARD_URL)
-            return
-        if self.on_login:
-            self.on_login()
-            self.login_var.set("Check your browser...")
-
-    def _do_logout(self):
-        if self.on_logout:
-            self.on_logout()
-            self.login_var.set("Not logged in")
-
-    def _toggle_secret(self):
-        try:
-            self.secret_entry.configure(show="" if self.show_secret_var.get() else "\u2022")
-        except Exception:
-            pass
-
-    def save_credentials(self, connect=True):
-        """Write config.json and (unless connect=False) reconnect right away, no restart. Not
-        debounced like the appearance settings: half-typed credentials must never trigger a login."""
-        cid, secret = self.cid_var.get().strip(), self.secret_var.get().strip()
-        if secret and not cid:
-            self.status_var.set("Enter the client ID too (or clear the secret).")
-            return False
-        try:
-            if not cid:
-                config.clear_credentials()
-            else:
-                config.save_credentials(cid, secret)
-        except OSError as exc:
-            log.error("couldn't write config.json: %s", exc)
-            messagebox.showerror("Couldn't save", f"Failed to write config.json:\n{exc}")
-            self.status_var.set("Couldn't save - see the log.")
-            return False
-        looks_odd = bool(cid) and not (re.fullmatch(r"[0-9a-fA-F]{32}", cid) and (not secret or re.fullmatch(r"[0-9a-fA-F]{32}", secret)))
-        note = "Saved."
-        if config.env_overrides_credentials():
-            note = "Saved, but the environment variables still take priority."
-        elif connect and self.on_credentials:
-            try:
-                ok = self.on_credentials()
-                note = "Saved. Connecting to Spotify..." if ok else "Saved, but the connection couldn't start - see the log."
-            except Exception:
-                log.exception("applying new Spotify credentials failed")
-                note = "Saved, but connecting failed - see the log."
-        if looks_odd:
-            note += " (Spotify IDs and secrets are normally 32 characters - double-check them.)"
-        self.status_var.set(note)
-        return True
-
-
-class LoginWindow:
-    """Small first-launch window: one big Log in with Spotify button (plus the advanced fields)."""
-
-    def __init__(self, root, on_credentials=None, on_login=None, on_logout=None):
-        self.root = root
-        root.title("LycRomanise \u2014 Log in to Spotify")
-        root.configure(bg=BG)
-        root.resizable(False, False)
-        _set_window_icon(root)
-        tk.Label(root, text="Welcome! Log in to Spotify", fg=FG, bg=BG,
-                 font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(16, 4))
-        tk.Label(root, text="Click the green button, sign in on the Spotify page that opens in your browser "
-                            "and press Agree. The lyrics strip then follows whatever you play.",
-                 fg=FG_DIM, bg=BG, font=("Segoe UI", 9), wraplength=360, justify="left",
-                 anchor="w").pack(anchor="w", padx=16, pady=(0, 10))
-        body = tk.Frame(root, bg=BG)
-        body.pack(fill="x", padx=16, pady=(0, 16))
-        self.panel = SpotifyPanel(body, on_credentials, on_login, on_logout, on_logged_in=self._done)
-
-    def _done(self):
-        """Logged in: the window has done its job."""
-        try:
-            self.root.after(1200, self.root.destroy)
-        except tk.TclError:
-            pass
-
-
 class ConfigEditor:
-    def __init__(self, root, on_apply=None, on_credentials=None, on_login=None, on_logout=None):
-        self.on_login, self.on_logout = on_login, on_logout
+    def __init__(self, root, on_apply=None):
         self.root = root
         self.on_apply = on_apply     # optional: called right after each save (the app also watches the file)
-        self.on_credentials = on_credentials   # optional: called after new Spotify credentials are saved
         self._apply_job = None
         self.root.title("LycRomanise v%s — Settings" % __import__("version").__version__)
         self.root.configure(bg=BG)
@@ -356,8 +135,6 @@ class ConfigEditor:
             body, text="Changes are saved and applied to the strip as you make them.",
             fg=FG_DIM, bg=BG, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=16, pady=(0, 12))
-
-        self._build_spotify_section(body)
 
         colors = tk.Frame(body, bg=BG)
         colors.pack(fill="x", padx=16, pady=(0, 12))
@@ -496,17 +273,6 @@ class ConfigEditor:
             self._scroll_canvas.configure(width=want_w, height=max(200, min(want_h, max_h)))
         except Exception:
             log.warning("couldn't size the settings window from its content", exc_info=True)
-
-    # ------------------------------------------------------------ Spotify --
-
-    def _build_spotify_section(self, body):
-        if config.playback_source() == "windows":
-            return      # nothing to log in to: the song is read from Windows
-        sec = tk.Frame(body, bg=BG)
-        sec.pack(fill="x", padx=16, pady=(0, 12))
-        tk.Label(sec, text="Spotify", fg=ACCENT, bg=BG, font=("Segoe UI", 10, "bold")).pack(
-            anchor="w", pady=(0, 6))
-        self.spotify_panel = SpotifyPanel(sec, self.on_credentials, self.on_login, self.on_logout)
 
     def _make_pick_and_refresh(self, row):
         def handler(_event=None):

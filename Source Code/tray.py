@@ -62,7 +62,7 @@ def load_icon_image(path=None, size=64):
     return make_icon_image(size)
 
 
-def menu_spec(is_locked, autostart_on, can_autostart=True, show_login=True):
+def menu_spec(is_locked, autostart_on, can_autostart=True):
     """Pure description of the tray menu: [(label, action_name, checked)] with
     None as a separator. Kept separate from pystray so it can be tested."""
     from version import __version__
@@ -71,8 +71,6 @@ def menu_spec(is_locked, autostart_on, can_autostart=True, show_login=True):
         None,
         (("Unlock position" if is_locked else "Lock position"), "toggle_lock", None),
     ]
-    if show_login:
-        spec += [("Log in with Spotify", "login", None), ("Log out of Spotify", "logout", None)]
     spec.append(("Settings…", "settings", None))
     if can_autostart:
         spec.append(("Start with Windows", "toggle_autostart", bool(autostart_on)))
@@ -84,9 +82,8 @@ class TrayIcon:
     """`actions` maps action names from menu_spec to zero-arg callables (run on
     the Tk thread via `post`); `state` returns (locked, autostart)."""
 
-    def __init__(self, actions, state, post, can_autostart=True, title=None, show_login=True):
+    def __init__(self, actions, state, post, can_autostart=True, title=None):
         self._actions, self._state, self._post = actions, state, post
-        self._show_login = show_login
         self._can_autostart = can_autostart
         from version import __version__
         self._title = title or "LycRomanise v%s" % __version__
@@ -94,7 +91,7 @@ class TrayIcon:
 
     def _build_menu(self):
         items = []
-        for entry in menu_spec(*self._state(), can_autostart=self._can_autostart, show_login=self._show_login):
+        for entry in menu_spec(*self._state(), can_autostart=self._can_autostart):
             if entry is None:
                 items.append(pystray.Menu.SEPARATOR)
                 continue

@@ -1,10 +1,9 @@
-"""Spoti-Lyrics Overlay — a small always-on-top synced-lyrics strip for Spotify,
+"""LycRomanise — a small always-on-top synced-lyrics strip for Spotify and Apple Music,
 with romanization for lyrics in many scripts.
 
 Run: double-click LyricsOverlay.pyw (or LyricsOverlay.bat) - no console window.
 `python app.py` also works: it relaunches itself without a console and exits.
 Quit from the tray icon.
-See README.md for one-time Spotify app setup.
 """
 
 import applog
@@ -51,24 +50,19 @@ def _safe(fn, *args):
 APP_NAME = "LycRomanise v%s" % __version__
 
 # --- polling ---------------------------------------------------------------
-# Spotify rate-limits per app, so the base rate stays gentle; sub-second
-# accuracy comes from interpolating the position between polls, not from
-# polling harder. Polling speeds up only where it pays off: for a few seconds
-# after a song changes (to lock the position in) and as a song is about to end
-# (to spot the next one right away).
+# The song is read from the Windows media controls, which is local (no network, no rate limit), so
+# it can be polled quickly. Polling speeds up for a few seconds after a song changes (to lock the
+# position in) and as a song is about to end (to spot the next one right away).
 UPDATE_BANNER_S = 12.0
 VERSION_BANNER_S = 5.0        # how long "LycRomanise v1.x.x" shows at startup
-# Reading Windows' media controls is local (no network, no rate limit), so it can be polled much
-# faster than the Spotify Web API could: song changes and skips are noticed sooner.
-_LOCAL_SOURCE = config.playback_source() == "windows"
-POLL_INTERVAL_MS = 500 if _LOCAL_SOURCE else 1000        # playing or paused (quicker skip detection)
-POLL_INTERVAL_IDLE_MS = 1000 if _LOCAL_SOURCE else 2000  # nothing playing at all
-FAST_POLL_MS = 250 if _LOCAL_SOURCE else 500
+POLL_INTERVAL_MS = 500          # playing or paused (quick skip detection)
+POLL_INTERVAL_IDLE_MS = 1000    # nothing playing at all
+FAST_POLL_MS = 250
 FAST_POLL_AFTER_CHANGE_S = 8.0
 END_OF_TRACK_WINDOW_S = 8.0
 RESULT_DRAIN_MS = 20          # how often the UI thread picks up finished background work
 # A new poll only *nudges* the interpolated position by this fraction of the
-# disagreement (Spotify's progress_ms is jittery), unless the gap is big
+# disagreement (the reported position is jittery), unless the gap is big
 # enough to be a real seek, in which case it snaps.
 POLL_CORRECTION_GAIN = 0.35
 POLL_SEEK_THRESHOLD_S = 1.0
@@ -213,18 +207,15 @@ class LyricsApp:
         self._last_scene_sig = None
         self._last_full_redraw = 0.0
         self._settings_window = None
-        self._login_window = None
-        self._login_thread = None        # the browser login (blocks until the user clicks Agree)
         self._appearance_mtime = self._appearance_stamp()
         self.tray = None
         self._tray_state = (False, False)
-        self.spotify = None
+        self.player = None
         self._polling = False
-        self._client_id = None
         self._poll_busy = False
         self._poll_started = 0.0
 
-        # The strip itself always comes up, even when Spotify can't be reached,
+        # The strip itself always comes up, even when the player can't be read,
         # so problems are shown *on it* (and in the log) instead of nowhere.
         self._build_desktop_ui(restore_lock=True)
         self.root.after(UI_CALL_DRAIN_MS, self._drain_ui_calls)
@@ -232,8 +223,7 @@ class LyricsApp:
         self.root.after(RESULT_DRAIN_MS, self._drain_results)
         self.root.after(LINE_TICK_MS, self._line_tick)
 
-        self._connect_spotify()
-        self._maybe_show_first_run_login()
+        self._connect_player()
         self._update_url = None
         self._update_release = None
         self._update_win = None
@@ -242,187 +232,26 @@ class LyricsApp:
             if config.check_updates_enabled():
                 self.root.after(1500, lambda: self.check_for_update(manual=False))
 
-    # ---------------------------------------------------- Spotify connection --
+    # -------------------------------------------------------- media reader --
 
-    def _maybe_show_first_run_login(self):
-        """First launch with no Spotify details at all (no app ID, no saved login): open the
-        login window so there is a visible button to press, instead of only a line on the strip."""
-        if os.environ.get("SPOTI_SELFTEST") or config.playback_source() == "windows":
-            return
-        try:
-            client_id, _secret = config.load_credentials()
-        except Exception:
-            client_id = None
-        if client_id or config.logged_in():
-            return      # an ID exists: _connect_spotify already started the browser login
-        self.root.after(800, self.open_login_window)
-
-    def _login_in_progress(self):
-        t = self._login_thread
-        return t is not None and t.is_alive()
-
-    def _start_login_thread(self):
-        """Open Spotify's login page in the browser and wait (off the UI thread) for the
-        user to click Agree. Polling is held back until it finishes."""
-        spotify = self.spotify
-        if spotify is None or self._login_in_progress():
-            return
-
-        def work():
-            ok, err = False, None
-            try:
-                ok = spotify.login()
-            except Exception as exc:
-                log.exception("Spotify login failed")
-                err = str(exc) or type(exc).__name__
-            self.post(lambda: self._login_done(spotify, ok, err))
-
-        self._set_notice("Log in to Spotify and click Agree in the page that just opened in your browser", "info")
-        self._login_thread = threading.Thread(target=work, daemon=True, name="spotify-login")
-        self._login_thread.start()
-
-    def _login_done(self, spotify, ok, err):
-        self._login_thread = None
-        if spotify is not self.spotify:
-            return      # logged out or switched app while the browser page was open
-        if ok:
-            log.info("Spotify login finished")
-            self._clear_notice()
-            self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
-            self._start_poll_worker()
-        else:
-            self._set_notice("Spotify login didn't finish: right-click the tray icon > Log in with Spotify to try again", "error")
-        self._refresh_tray()
-
-    def _connect_spotify(self):
-        """Read the credentials and (re)start the Spotify client. Used at startup
-        and again whenever Settings saves new credentials, so no restart is needed.
-        Returns True when a client is running."""
+    def _connect_player(self):
+        """Start reading what is playing from the Windows media controls.
+        Returns True when the reader is running."""
         if os.environ.get("SPOTI_SELFTEST"):
             # --selftest feeds the strip a demo song; a real poll would replace it with
-            # whatever Spotify is (or is not) playing and empty the strip.
-            log.info("selftest: Spotify polling is off")
+            # whatever is (or is not) playing and empty the strip.
+            log.info("selftest: polling is off")
             return False
-        if config.playback_source() == "windows":
-            # No Spotify API, no login: Windows tells us what Spotify is playing.
-            try:
-                self.spotify = MediaClient()
-            except Exception as exc:
-                log.exception("couldn't start the Windows media reader")
-                self._set_notice("Couldn't read what's playing: %s" % exc, "error")
-                return False
-            self._client_id = None
-            if not self._polling:
-                self._polling = True
-                self.root.after(0, self._poll)
-            return True
         try:
-            client_id, client_secret = config.load_credentials()
+            self.player = MediaClient()
         except Exception as exc:
-            log.exception("couldn't read config.json")
-            client_id = client_secret = None
-            self._set_notice("config.json is unreadable: %s" % exc, "error")
-        if not client_id:
-            log.error("No Spotify client ID: set BUILTIN_CLIENT_ID in config.py, or enter one in Settings (%s)",
-                      config.CONFIG_PATH)
-            if self._notice is None:
-                self._set_notice("Not logged in: right-click the system tray icon > Log in with Spotify", "error")
+            log.exception("couldn't start the Windows media reader")
+            self._set_notice("Couldn't read what's playing: %s" % exc, "error")
             return False
-
-        try:
-            from spotify_client import SpotifyClient      # only needed for playback_source = spotify_api
-            self.spotify = SpotifyClient(client_id, client_secret)
-        except Exception as exc:
-            log.exception("couldn't start the Spotify client")
-            self._set_notice("Spotify client couldn't start: %s" % exc, "error")
-            return False
-        self._client_id = (client_id, bool(client_secret))
-
-        if not os.path.exists(config.TOKEN_CACHE_PATH):
-            self._start_login_thread()      # opens the browser page; polling waits for it
         if not self._polling:
             self._polling = True
             self.root.after(0, self._poll)
         return True
-
-    def login_spotify(self):
-        """Tray / button: start a fresh browser login (also fixes an expired one)."""
-        if config.playback_source() == "windows":
-            self._set_notice("No Spotify login needed: the song is read from Windows", "info", seconds=6)
-            return
-        if self._login_in_progress():
-            self._set_notice("Still waiting for the Spotify login: finish it in the browser tab that opened", "info", seconds=8)
-            return
-        try:
-            has_id = bool(config.load_credentials()[0])
-        except Exception:
-            has_id = False
-        if not has_id:
-            # Nothing to log in with yet (this build has no built-in app): show the window that
-            # explains it and lets the user add their own app, rather than doing nothing.
-            self.open_login_window()
-            return
-        try:
-            os.remove(config.TOKEN_CACHE_PATH)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            log.exception("couldn't remove the old Spotify login")
-        self._clear_notice()
-        self.spotify = None
-        if self._connect_spotify():
-            self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
-            self._start_poll_worker()
-        self._refresh_tray()
-
-    def logout_spotify(self):
-        """Tray > Log out: forget the saved Spotify login and stop polling."""
-        if config.playback_source() == "windows":
-            return
-        try:
-            os.remove(config.TOKEN_CACHE_PATH)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            log.exception("couldn't remove the Spotify login")
-        self.spotify = None
-        self._set_notice("Logged out: right-click the system tray icon > Log in with Spotify", "error")
-        self._refresh_tray()
-        log.info("logged out of Spotify")
-
-    def apply_credentials(self):
-        """Settings saved new Spotify credentials: switch to them now. A saved login
-        (the token cache) belongs to the app whose client ID produced it, so it is
-        dropped when the ID changed; the browser approval page then opens once."""
-        old_id = getattr(self, "_client_id", None)
-        try:
-            new_id, _secret = config.load_credentials()
-        except Exception:
-            new_id = None
-        try:
-            new_id = (new_id, bool(_secret)) if new_id else None
-        except Exception:
-            pass
-        if old_id and new_id and new_id != old_id:
-            try:
-                os.remove(config.TOKEN_CACHE_PATH)
-                log.info("client ID changed: cleared the saved Spotify login")
-            except FileNotFoundError:
-                pass
-            except OSError:
-                log.exception("couldn't remove the old Spotify login cache")
-        if self._login_in_progress():
-            self._set_notice("Still waiting for the Spotify login: finish it in the browser tab that opened", "info", seconds=8)
-            return False
-        log.info("Spotify credentials changed; reconnecting")
-        self._clear_notice()
-        # The new client replaces the old one in a single assignment (background threads may
-        # be using it right now); if the new one cannot start, the old one keeps running.
-        if self._connect_spotify():
-            self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
-            self._start_poll_worker()      # don't wait for the next scheduled poll
-            return True
-        return False
 
     # ----------------------------------------------------------------- DPI --
 
@@ -452,16 +281,10 @@ class LyricsApp:
     def strip_h(self):
         return self._px(DESKTOP_HEIGHT)
 
-    def _show_setup_error(self, detail=None):
-        msg = "Not logged in to Spotify: right-click the system tray icon > Log in with Spotify"
-        if detail:
-            msg += f"\n({detail})"
-        self._set_notice(msg, "error")
-
     # ------------------------------------------------------------ notices --
 
     def _set_notice(self, text, kind="error", seconds=None):
-        """A small message on the strip (Spotify sign-in trouble etc.). Errors
+        """A small message on the strip (a problem reading the player etc.). Errors
         stay until the problem clears; info notices can time out."""
         until = time.perf_counter() + seconds if seconds else None
         if self._notice and self._notice["text"] == text:
@@ -694,8 +517,6 @@ class LyricsApp:
         self.tray = tray.TrayIcon(
             actions={
                 "toggle_lock": self._toggle_lock,
-                "login": self.login_spotify,
-                "logout": self.logout_spotify,
                 "settings": self.open_settings,
                 "toggle_autostart": self._toggle_autostart,
                 "about": lambda: winsys.open_url(RELEASES_URL),
@@ -706,7 +527,6 @@ class LyricsApp:
             state=lambda: self._tray_state,
             post=self.post,
             can_autostart=winsys.is_windows(),
-            show_login=config.playback_source() != "windows",
         )
         if not self.tray.start():
             self.tray = None
@@ -854,44 +674,13 @@ class LyricsApp:
             import config_editor
             win = tk.Toplevel(self.root)
             win.attributes("-topmost", True)   # the strip is topmost too; stay above it
-            config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_credentials=self.apply_credentials,
-                                       on_login=self.login_spotify, on_logout=self.logout_spotify)
+            config_editor.ConfigEditor(win, on_apply=self.reload_appearance)
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(win))
             self._settings_window = win
             win.focus_force()
         except Exception:
             log.exception("couldn't open settings")
             self._set_notice("Couldn't open settings - see the log", "error", seconds=8)
-
-    def open_login_window(self):
-        """The small "Log in with Spotify" window (shown on first launch when no details exist)."""
-        try:
-            if self._login_window is not None:
-                try:
-                    self._login_window.deiconify()
-                    self._login_window.lift()
-                    self._login_window.focus_force()
-                    return
-                except tk.TclError:
-                    self._login_window = None
-            import config_editor
-            win = tk.Toplevel(self.root)
-            win.attributes("-topmost", True)
-            config_editor.LoginWindow(win, on_credentials=self.apply_credentials,
-                                      on_login=self.login_spotify, on_logout=self.logout_spotify)
-            win.protocol("WM_DELETE_WINDOW", lambda: self._close_login_window(win))
-            self._login_window = win
-            win.focus_force()
-        except Exception:
-            log.exception("couldn't open the login window")
-            self._set_notice("Couldn't open the login window - see the log", "error", seconds=8)
-
-    def _close_login_window(self, win):
-        self._login_window = None
-        try:
-            win.destroy()
-        except tk.TclError:
-            pass
 
     def _close_settings(self, win):
         self._settings_window = None
@@ -1094,7 +883,7 @@ class LyricsApp:
             if remaining < END_OF_TRACK_WINDOW_S:
                 # Aim just past the end of the song so the next one is
                 # noticed almost as soon as it starts.
-                return int(max(150 if _LOCAL_SOURCE else 250, min(POLL_INTERVAL_MS, (remaining + 0.15) * 1000)))
+                return int(max(150, min(POLL_INTERVAL_MS, (remaining + 0.15) * 1000)))
         return POLL_INTERVAL_MS
 
     def _poll(self):
@@ -1108,14 +897,14 @@ class LyricsApp:
     def _start_poll_worker(self):
         try:
             now = time.perf_counter()
-            if self.spotify is None or self._login_in_progress():
+            if self.player is None:
                 return
             if not self._poll_busy:
                 self._poll_busy = True
                 self._poll_started = now
                 threading.Thread(
                     target=self._poll_worker, args=(self.current_track_id,),
-                    daemon=True, name="spotify-poll",
+                    daemon=True, name="media-poll",
                 ).start()
             elif now - self._poll_started > 45:
                 log.warning("previous poll never finished; starting a new one")
@@ -1126,14 +915,14 @@ class LyricsApp:
 
     def _poll_worker(self, known_track_id):
         try:
-            spotify = self.spotify      # local copy: Settings may swap in a new client meanwhile
-            status, track = spotify.poll()
+            player = self.player
+            status, track = player.poll()
             received = time.perf_counter()
             # Hand the track over immediately so the title card can appear
             # while the lyrics are still being looked up.
             self._results.put(("track", status, track, received))
             if status == "ok" and track and track["id"] != known_track_id:
-                track = self._settle_length(spotify, track)
+                track = self._settle_length(player, track)
                 self._lookup_lengths = {track["id"]: track.get("duration_ms") or 0}
                 log.info("looking up lyrics for %r (track length %.0fs)", track["name"],
                          (track.get("duration_ms") or 0) / 1000.0)
@@ -1142,22 +931,18 @@ class LyricsApp:
                 if not (result and result[0]) and outage_since(asked):
                     result = self._retry_after_outage(track, result)
                 self._results.put(("lyrics", track["id"], result))
-                # Own thread: prefetching must never keep the poller busy, or the
-                # next song change would be noticed late.
-                threading.Thread(target=self._prefetch_next, args=(track,),
-                                 daemon=True, name="lyrics-prefetch").start()
         except Exception:
             log.exception("poll worker error (recovering)")
             self._results.put(("track", "error", None, time.perf_counter()))
 
-    def _settle_length(self, spotify, track):
+    def _settle_length(self, player, track):
         """Right after a skip Windows can report the previous song's length for a moment, and a
         wrong length picks the wrong edition of the lyrics. Ask again until it changes."""
         for _ in range(3):
             if not track.get("duration_suspect"):
                 break
             time.sleep(0.7)
-            status, fresh = spotify.poll()
+            status, fresh = player.poll()
             if status != "ok" or not fresh or fresh["id"] != track["id"]:
                 break
             track = fresh
@@ -1222,24 +1007,6 @@ class LyricsApp:
                 break              # the site answered normally: really not there
         return result
 
-    PREFETCH_COUNT = 3
-
-    def _prefetch_next(self, current):
-        """Look up the lyrics of the next PREFETCH_COUNT queued songs while
-        this one plays, so they are already cached when those songs start."""
-        try:
-            done = {current["id"]}
-            for nxt in self.spotify.get_upcoming_tracks(self.PREFETCH_COUNT):
-                if self.current_track_id != current["id"]:
-                    return   # song changed meanwhile; the new song starts its own prefetch
-                if nxt["id"] in done:
-                    continue   # the song itself again (repeat) or a duplicate in the queue
-                done.add(nxt["id"])
-                log.info("prefetching lyrics for upcoming track: %s", nxt["name"])
-                fetch_lyrics(nxt["name"], nxt["artist"], nxt["album"], nxt["duration_ms"])
-        except Exception:
-            log.exception("prefetch error (recovering)")
-
     def _drain_results(self):
         try:
             while True:
@@ -1260,16 +1027,9 @@ class LyricsApp:
 
     def _handle_track(self, status, track, received):
         self._poll_busy = False
-        if status == "auth_error":
-            if getattr(self.spotify, "last_auth_status", None) == 403:
-                self._set_notice("Spotify says this account isn't allowed on this app: add it under Users and Access, "
-                                 "or use your own app (tray > Settings > Advanced)", "error")
-            else:
-                self._set_notice("Spotify login failed or expired: right-click the tray icon > Log in with Spotify", "error")
-            return
         if status == "error":
             return   # couldn't find out: keep showing what we had
-        self._clear_notice()   # Spotify answered: any sign-in/first-run notice is out of date
+        self._clear_notice()   # the player answered: any earlier notice is out of date
 
         if status == "idle" or track is None:
             if self.current_track_id is not None:
@@ -1286,7 +1046,7 @@ class LyricsApp:
         polled = track["progress_ms"] / 1000.0
         was_playing = self._is_playing
         if not changed and was_playing and track["is_playing"]:
-            # Nudge the running estimate toward Spotify's jittery figure
+            # Nudge the running estimate toward the player's jittery figure
             # instead of snapping, unless the gap is a real seek.
             est = self._last_position_s + (received - self._last_poll_perf)
             diff = polled - est
@@ -1417,7 +1177,7 @@ class LyricsApp:
 
     def _line_tick(self):
         """Re-check which line is current on a much shorter cadence than the
-        Spotify poll, so lines never show up late or get skipped."""
+        player poll, so lines never show up late or get skipped."""
         try:
             if self.segments and self._is_playing:
                 self._update_display(self._estimate_position_s())

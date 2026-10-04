@@ -1,9 +1,9 @@
 """Where things live.
 
 Frozen (the .exe): the program sits wherever it was installed (e.g. Program Files),
-which is often read-only, so everything the app writes (settings, Spotify login,
+which is often read-only, so everything the app writes (settings,
 lyrics cache, logs) goes to %LOCALAPPDATA%\\LycRomanise. Local rather than Roaming:
-the cache and Spotify token are machine-specific and shouldn't sync between PCs.
+the cache is machine-specific and shouldn't sync between PCs.
 Bundled resources (the icon) come from PyInstaller's temp unpack folder.
 From source: both are the source folder, so development is unchanged.
 """
@@ -28,7 +28,7 @@ except OSError:
     pass
 
 # Older builds kept their files next to the .exe: move them across once.
-_LEGACY = ("config.json", "appearance.json", "window_state.json", ".spotify_token_cache",
+_LEGACY = ("config.json", "appearance.json", "window_state.json",
            "lyrics_cache.json", "provider_health.json")
 if FROZEN and os.path.normcase(APP_DIR) != os.path.normcase(DATA_DIR):
     for _name in _LEGACY:

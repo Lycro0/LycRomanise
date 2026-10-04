@@ -42,7 +42,7 @@ def run_selftest(wait_s=6.0):
     diagnostics (mapped, styles, colour key, on-screen lyric pixels on Windows) and
     exit 0/1. The result goes to logs/spoti-lyrics.log and logs/selftest-result.txt.
     Run:  python app.py --selftest   (prints nothing; check those files).
-    Uses real Tk, so unlike tests/ it can catch real-window bugs. Spotify is not contacted."""
+    Uses real Tk, so unlike tests/ it can catch real-window bugs. The player is not read."""
     os.environ["SPOTI_SELFTEST"] = "1"
     _selftest_report("selftest start (python %s, %s)" % (sys.version.split()[0], sys.platform))
     ok = False
