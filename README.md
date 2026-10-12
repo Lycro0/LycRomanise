@@ -1,10 +1,10 @@
-# LycRomanise v1.2.0
+# LycRomanise v1.3.0
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
-Spotify or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
+Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
 romaji, pinyin). Inspired by [Lyricify](https://github.com/WXRIW/Lyricify-App).
 
-An original implementation written in Python. Not affiliated with Spotify, Apple, or Lyricify/WXRIW.
+An original implementation written in Python. Not affiliated with Spotify, Spotifast, Apple, or Lyricify/WXRIW.
 
 ## Download
 
@@ -14,7 +14,8 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
 ## What it does
 
 - Reads what is playing from the **Windows media controls**, so it works with the Spotify desktop
-  app, Apple Music for Windows and iTunes. If both are open, whichever is playing wins.
+  app, [Spotifast](https://spotifast.rocks) (the open source, low-memory Spotify client), Apple Music
+  for Windows and iTunes. If more than one is open, whichever is playing wins.
 - Fetches synced lyrics from [LRCLIB](https://lrclib.net) (free, no key) and checks them before use.
 - Shows a small, frameless, always-on-top **strip** with the current line (karaoke-colored, yellow
   turning to pink as the line is sung) and the next line below it, with a slide transition between lines.
@@ -34,10 +35,13 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
 - **Lock it:** hover the strip and click the small padlock that appears at the top, or use the tray
   menu. A locked strip is click-through on Windows, so clicks reach whatever is underneath. The
   padlock stays clickable.
+- **Hide the padlock:** turn on "Hide the lock icon" in Settings (`hide_lock_icon`). The padlock never
+  appears, and the strip is locked and unlocked only from the tray menu (Lock position / Unlock
+  position). If the tray icon isn't running, the padlock is kept so the strip can still be unlocked.
 - **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Check for updates, Open logs
   folder, Quit. There is no taskbar button and no right-click menu.
 - **Settings…** (from the tray) changes karaoke colors, next-line color, font sizes, strip width and
-  height, lyric offset, outline, the title card and Start with Windows. Changes apply live and are saved
+  height, lyric offset, outline, the title card, hiding the lock icon and Start with Windows. Changes apply live and are saved
   to `appearance.json`. "Reset to defaults" restores the built-in look.
 - **Lyric offset** shifts all lyrics in 100 ms steps (`lyric_offset_ms`).
 - **Title card** (off by default): turn on `show_title_card` to show "Artist - Song" before the first line.
@@ -111,7 +115,7 @@ Then double-click `LyricsOverlay.pyw` (no console window), or run `python app.py
 separate console-less copy and returns. Only one copy runs at a time. Quit from the tray icon.
 
 The `winrt-*` packages read the Windows media controls. If they are missing, or Windows shows no
-session, the app falls back to the Spotify window title ("Artist - Song"), which has no length or
+session, the app falls back to the player's window title ("Artist - Song"), which has no length or
 position, so timing is counted from when the song was first seen and can drift after a seek.
 
 **Building the .exe:** `build_exe.bat` (PyInstaller, uses `LycRomanise.spec`) and `build_installer.bat`
@@ -123,7 +127,7 @@ When installed, settings, cache and logs are in `%LOCALAPPDATA%\LycRomanise`. Fr
 
 | File | Contents |
 | --- | --- |
-| `appearance.json` | colors, sizes, offset, title card (changed in Settings) |
+| `appearance.json` | colors, sizes, offset, title card, lock icon (changed in Settings) |
 | `window_state.json` | strip position and lock state |
 | `config.json` | optional: `"check_updates": false` turns the update check off |
 | `lyrics_cache.json` | cached lyrics |
@@ -138,7 +142,7 @@ and why. Don't share `logs/` or `lyrics_cache.json` publicly: they list the song
 
 ```
 app.py              GUI, polling loop, the strip
-media_client.py     reads Spotify / Apple Music from the Windows media controls
+media_client.py     reads Spotify / Spotifast / Apple Music from the Windows media controls
 lyrics_provider.py  LRCLIB lookup, matching, cache, outage handling
 lyrics_check.py     checks lyrics before use
 config.py           settings files and paths
@@ -184,6 +188,10 @@ find which piece breaks on your machine, set one of these before starting:
 | `SPOTI_DEBUG_NO_DPI=1` | does not enable DPI awareness |
 | `SPOTI_DEBUG_DIAGNOSTICS=1` | logs the diagnostics line again at 6 s and on lock toggles |
 | `SPOTI_NO_DETACH=1` | keeps the app attached to the terminal (output still goes only to the log) |
+
+**A player isn't picked up:** the log line `no supported player among the Windows media sessions: [...]`
+lists what Windows is showing, and `reading playback from media session ...` names the one in use. If
+your player is listed there but not read, its name needs adding to `APP_MATCHES` in `media_client.py`.
 
 **Wrong lyrics or no lyrics:** play the song once and check `logs/spoti-lyrics.log`. The
 `looking up lyrics for ...` and `lrclib: ...` lines show the length used and the entry chosen or why

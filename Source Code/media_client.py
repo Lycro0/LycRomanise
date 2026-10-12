@@ -1,10 +1,10 @@
-"""Finds out what Spotify or Apple Music is playing by asking Windows (no login, no account, no
-rate limit). The Spotify desktop app publishes the current song to the
+"""Finds out what Spotify, Spotifast or Apple Music is playing by asking Windows (no login, no
+account, no rate limit). These players publish the current song to the
 Windows media controls (the volume-flyout / lock-screen player, "SMTC"): title,
 artist, album, length, position and play/pause state. That is read locally.
 
-If that isn't available (the `winrt` packages are missing, or Windows has no Spotify
-media session), it falls back to reading the Spotify window title ("Artist - Song").
+If that isn't available (the `winrt` packages are missing, or Windows has no media
+session for the player), it falls back to reading the player's window title ("Artist - Song").
 The title has no length or position, so the position is counted from when the song
 was first seen. Lyrics still work, but the timing can be a bit off after a seek.
 """
@@ -20,13 +20,22 @@ from datetime import datetime, timezone
 log = logging.getLogger("spoti.media")
 
 # SMTC session ids: Spotify desktop "Spotify.exe" / Store "SpotifyAB.SpotifyMusic_...!Spotify";
+# Spotifast (open source, low-memory Spotify client, spotifast.rocks) "spotifast.exe", or
+# "fastpotify.exe" for installs from before it was renamed;
 # Apple Music for Windows "AppleInc.AppleMusicWin_...!App"; classic "iTunes.exe".
-APP_MATCHES = ("spotify", "applemusic", "apple music", "itunes")
-# Spotify shows these instead of a song while an ad plays or when paused.
-NOT_A_SONG = {"", "spotify", "spotify free", "spotify premium", "advertisement", "spotify - web player"}
+# Matching is by substring, and "spotify" is not inside "spotifast", so Spotifast is listed on its own.
+APP_MATCHES = ("spotify", "spotifast", "fastpotify", "applemusic", "apple music", "itunes")
+# Window title fallback: the player's process names (lower case).
+PLAYER_EXES = ("spotify.exe", "spotifast.exe", "fastpotify.exe")
+# These show up instead of a song while an ad plays or when paused / idle.
+NOT_A_SONG = {"", "spotify", "spotify free", "spotify premium", "advertisement", "spotify - web player",
+              "spotifast", "fastpotify"}
+# Window titles that mean "paused" (the app is open but shows its own name).
+PAUSED_TITLES = ("spotify", "spotify free", "spotify premium", "spotifast", "fastpotify")
 
 PLAYING = 4          # GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
-PAUSED = 5
+SMTC_MAX_FAILURES = 5        # in a row, then the media controls are left alone for a while
+SMTC_RETRY_AFTER_S = 30.0    # ...and tried again after this long
 
 try:                                    # winrt-* packages (maintained)
     from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as _Manager
@@ -76,7 +85,9 @@ class MediaClient:
     def __init__(self):
         self._manager = None
         self._smtc_failures = 0
-        self._smtc_ok_once = False
+        self._smtc_retry_at = 0.0       # monotonic time the media controls are tried again after repeated failures
+        self._logged_app = None         # media session id last logged as the one being read
+        self._logged_unmatched = None   # media session ids last logged when none matched
         # Length bookkeeping: right after a skip Windows can still report the previous song's length.
         self._len_key = None            # (artist, title) being watched
         self._len_prev_ms = 0           # last length seen for the song before it
@@ -96,28 +107,31 @@ class MediaClient:
     # ------------------------------------------------------------------ API --
 
     def poll(self):
-        if smtc_available() and self._smtc_failures < 5:
+        if smtc_available() and self._smtc_usable():
             try:
                 result = asyncio.run(self._poll_smtc())
                 self._smtc_failures = 0
                 if result is not None:
-                    self._smtc_ok_once = True
                     return result
-                # No Spotify media session: maybe Spotify just isn't open - try the title.
+                # No supported media session: maybe the player isn't open - try the window title.
             except Exception as exc:
                 self._smtc_failures += 1
                 self._manager = None
                 log.warning("Windows media controls failed (%s: %s)", type(exc).__name__, exc)
+                if self._smtc_failures >= SMTC_MAX_FAILURES:
+                    self._smtc_retry_at = time.monotonic() + SMTC_RETRY_AFTER_S
+                    log.warning("media controls failed %d times in a row; using the window title for %.0f s",
+                                self._smtc_failures, SMTC_RETRY_AFTER_S)
         return self._poll_window_title()
 
-    def get_current_track(self):
-        status, track = self.poll()
-        return track if status == "ok" else None
-
-    def get_next_track(self):
-        return None
-
-    def login(self):                 # nothing to log in to
+    def _smtc_usable(self):
+        """False while the media controls are resting after repeated failures. After the rest one
+        more failure puts them back to sleep, so a broken setup doesn't spam the log."""
+        if self._smtc_failures < SMTC_MAX_FAILURES:
+            return True
+        if time.monotonic() < self._smtc_retry_at:
+            return False
+        self._smtc_failures = SMTC_MAX_FAILURES - 1
         return True
 
     # ----------------------------------------------------------------- SMTC --
@@ -125,20 +139,31 @@ class MediaClient:
     async def _poll_smtc(self):
         if self._manager is None:
             self._manager = await _Manager.request_async()
-        session, session_playing = None, False
+        session, session_playing, session_app = None, False, ""
+        seen_ids = []
         for s in self._manager.get_sessions():
             try:
                 app_id = (s.source_app_user_model_id or "").lower()
+                seen_ids.append(app_id)
                 if not any(m in app_id for m in APP_MATCHES):
                     continue
                 playing = int(getattr(s.get_playback_info().playback_status, "value",
                                       s.get_playback_info().playback_status)) == PLAYING
                 if session is None or (playing and not session_playing):
-                    session, session_playing = s, playing     # prefer whichever is playing
+                    session, session_playing, session_app = s, playing, app_id    # prefer whichever is playing
             except Exception:
                 continue
         if session is None:
+            # Log what Windows does list (once per change), so a player that isn't recognised
+            # can be added to APP_MATCHES from the log.
+            key = tuple(sorted(seen_ids))
+            if key != self._logged_unmatched:
+                self._logged_unmatched = key
+                log.info("no supported player among the Windows media sessions: %s", list(key) or "none")
             return None
+        if session_app != self._logged_app:
+            self._logged_app = session_app
+            log.info("reading playback from media session %s", session_app)
 
         props = await session.try_get_media_properties_async()
         title = (props.title or "").strip()
@@ -205,7 +230,7 @@ class MediaClient:
         if " - " not in title or low in NOT_A_SONG:
             # Paused (title goes back to "Spotify Free/Premium") or an ad.
             last = self._title_last_track
-            if last is not None and low in ("spotify", "spotify free", "spotify premium"):
+            if last is not None and low in PAUSED_TITLES:
                 if self._title_paused_at is None:
                     self._title_paused_at = now
                 return ("ok", self._title_track(last, now, playing=False))
@@ -233,7 +258,7 @@ class MediaClient:
 # ---------------------------------------------------------- window helpers ---
 
 def spotify_window_title():
-    """Title of the Spotify desktop window, or None if there isn't one."""
+    """Title of the Spotify (or Spotifast) desktop window, or None if there isn't one."""
     if sys.platform != "win32":
         return None
     user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
@@ -254,10 +279,10 @@ def spotify_window_title():
                 buf = ctypes.create_unicode_buffer(520)
                 size = wintypes.DWORD(520)
                 if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                    if buf.value.lower().endswith("spotify.exe"):
+                    if buf.value.lower().endswith(PLAYER_EXES):
                         text = ctypes.create_unicode_buffer(length + 1)
                         user32.GetWindowTextW(hwnd, text, length + 1)
-                        # Spotify has several windows; the real one has a visible, non-empty title.
+                        # The player can have several windows; the real one has a visible, non-empty title.
                         if text.value:
                             found.append(text.value)
             finally:

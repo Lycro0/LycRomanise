@@ -116,7 +116,8 @@ def download(release, progress=None):
     if not asset or not _trusted_url(asset["url"]):
         raise RuntimeError("This release has no %s to download." % name)
     os.makedirs(UPDATE_DIR, exist_ok=True)
-    dest = os.path.join(UPDATE_DIR, "%s.%s" % (release["tag"].lstrip("vV"), name))
+    safe_tag = re.sub(r"[^0-9A-Za-z._-]", "_", release["tag"].lstrip("vV")) or "new"   # a tag can hold "/" etc.
+    dest = os.path.join(UPDATE_DIR, "%s.%s" % (safe_tag, name))
     part = dest + ".part"
     sha = hashlib.sha256()
     done = 0

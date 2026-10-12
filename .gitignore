@@ -8,3 +8,4 @@ lyrics_cache.json
 provider_health.json
 build_tmp/
 *.exe
+lyrics_cache.json.tmp

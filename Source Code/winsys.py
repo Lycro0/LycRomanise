@@ -268,8 +268,6 @@ WS_EX_TRANSPARENT = 0x00000020
 GA_ROOT = 2
 RDW_INVALIDATE = 0x0001
 RDW_ALLCHILDREN = 0x0080
-LWA_COLORKEY = 0x1
-LWA_ALPHA = 0x2
 
 
 def top_level_hwnd(tk_window_id, api=None):

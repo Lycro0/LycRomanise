@@ -482,9 +482,12 @@ def _save_cache(cache):
     # Keep only the newest entries so the file can't grow forever.
     while len(cache) > CACHE_MAX_ENTRIES:
         cache.pop(next(iter(cache)))
+    tmp = CACHE_PATH + ".tmp"
     try:
-        with open(CACHE_PATH, "w", encoding="utf-8") as f:
+        # Write beside the file, then swap: killing the app mid-write can't leave a cut-off cache.
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False)
+        os.replace(tmp, CACHE_PATH)
     except OSError as exc:
         log.warning("couldn't write lyrics cache: %s", exc)
 
@@ -523,8 +526,8 @@ def fetch_lyrics(track_name, artist_name, album_name=None, duration_ms=None):
             and not lyrics_check.is_placeholder(hit["synced"])):
         return [tuple(x) for x in hit["synced"]], hit.get("plain")
 
-    # One lookup per song at a time: if the prefetch is already fetching this song when it
-    # starts playing, the player just waits for that result.
+    # One lookup per song at a time: if a retry or re-lookup is already fetching this song, a
+    # second request just waits for that result.
     with _inflight_lock:
         fut = _inflight.get(key)
         owner = fut is None

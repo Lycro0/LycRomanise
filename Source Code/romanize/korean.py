@@ -25,7 +25,6 @@ for a "romanized lyrics" display.
 """
 
 SBASE = 0xAC00
-LCOUNT = 19
 VCOUNT = 21
 TCOUNT = 28
 NCOUNT = VCOUNT * TCOUNT  # 588

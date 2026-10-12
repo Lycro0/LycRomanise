@@ -7,8 +7,7 @@ under the top one.
 
 Timing works on the whole original line and is then shared out:
   * every line has a fill fraction (0..1) for "how much of it has been sung",
-    taken from real per-word timing when the source has it, otherwise
-    estimated from the line's length;
+    estimated from the line's length (lyrics only give each line's start);
   * a chunk covers the slice [f0, f1] of that fraction, so its own fill is
     (line_fraction - f0) / (f1 - f0), and it becomes the current line at the
     moment the line's fraction reaches f0.
@@ -29,10 +28,10 @@ class Seg:
 
 class LineInfo:
     """Timing data for one original lyric line."""
-    __slots__ = ("ts", "text", "span")
+    __slots__ = ("ts", "span")
 
-    def __init__(self, ts, text, span):
-        self.ts, self.text, self.span = ts, text, span
+    def __init__(self, ts, span):
+        self.ts, self.span = ts, span
 
 def split_display(text, max_chars):
     """Cut `text` into balanced chunks of at most ~max_chars, at spaces.
@@ -108,7 +107,7 @@ def build_segments(lines, displays, max_chars, last_span, chars_per_second, min_
         text = displays[i]
         avail = (lines[i + 1][0] - ts) if i + 1 < n else last_span
         est = max(min_fill, len(text) / chars_per_second)
-        info = LineInfo(ts, text, max(0.05, min(avail, est)))
+        info = LineInfo(ts, max(0.05, min(avail, est)))
         infos.append(info)
 
         next_ts = lines[i + 1][0] if i + 1 < n else None

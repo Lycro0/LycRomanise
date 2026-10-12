@@ -19,7 +19,6 @@ from logging.handlers import TimedRotatingFileHandler
 
 from paths import DATA_DIR as BASE_DIR
 LOG_DIR = os.path.join(BASE_DIR, "logs")
-LOG_FILE = None  # derived from LOG_DIR in setup()
 
 _done = False
 _native_crash_file = None  # kept referenced so faulthandler's fd stays open

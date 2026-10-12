@@ -298,11 +298,6 @@ def _lang_for(text, forced=None):
     code = detect_script(text)
     return code if code in ("ko", "ja", "zh", "ar", "ru") else "en"
 
-def line_language(text):
-    """Language code normalize() would use for this line."""
-    return _lang_for(text)
-
-
 def _digits_only(s, lang):
     names = _DIGIT_NAMES[lang]
     words = [names[int(c)] for c in s if c.isdigit()]

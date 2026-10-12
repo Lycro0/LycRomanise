@@ -1,4 +1,4 @@
-"""LycRomanise — a small always-on-top synced-lyrics strip for Spotify and Apple Music,
+"""LycRomanise — a small always-on-top synced-lyrics strip for Spotify, Spotifast and Apple Music,
 with romanization for lyrics in many scripts.
 
 Run: double-click LyricsOverlay.pyw (or LyricsOverlay.bat) - no console window.
@@ -11,7 +11,6 @@ import applog
 applog.setup()   # first thing: file logging + crash capture (nothing goes to a console)
 
 import logging
-import math
 import os
 import queue
 import sys
@@ -19,16 +18,15 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
-from functools import lru_cache
 
 import config
 import layout
 import tray
 import winddiag
 import winsys
-from drawing import (OUTLINE_RGB, _draw_outline_only, _draw_outlined_text, _ease_out_cubic,
-                     _lerp_rgb, _outline_offsets, _rgb_to_hex)
-from selftest import _selftest_report, run_selftest
+from drawing import (TextMeter, _draw_outline_only, _draw_outlined_text, _ease_out_cubic, _lerp_rgb,
+                     _rgb_to_hex)
+from selftest import run_selftest
 from lyrics_provider import fetch_lyrics, is_non_song, outage_since
 from romanize import detect_script, needs_romanization, romanize_line
 from media_client import MediaClient
@@ -88,6 +86,7 @@ OUTLINE_SIZE = 1.5
 SPAWN_Y_PERCENT = 18
 MAX_LINE_CHARS = 0
 SHOW_TITLE_CARD = False
+HIDE_LOCK_ICON = False       # no padlock on the strip; lock and unlock from the tray menu only
 
 # Karaoke fill: the current line starts yellow (not-yet-sung) and turns pink
 # left to right as playback reaches it, blended across a band scaled to the
@@ -98,9 +97,9 @@ KARAOKE_GRADIENT_MIN_PX = 20
 KARAOKE_GRADIENT_CHAR_SPAN = 2.2
 LYRIC_OFFSET_S = 0.0   # +ve = lyrics run earlier; set via Settings / appearance.json
 
-# Sources without per-word timing only give each line's *start*; assuming it
-# finishes when the next line starts makes the fill crawl through pauses, so
-# the fill is capped to a plausible sung pace for the line's length.
+# Lyrics only give each line's *start*; assuming it finishes when the next line starts
+# makes the fill crawl through pauses, so the fill is capped to a plausible sung pace for
+# the line's length.
 KARAOKE_CHARS_PER_SECOND = 6.0
 KARAOKE_MIN_FILL_SECONDS = 0.6
 
@@ -127,7 +126,7 @@ def _load_appearance():
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
     global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
     global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
-    global MAX_LINE_CHARS, SHOW_TITLE_CARD
+    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON
 
     def num(key, cast, default):
         try:
@@ -150,6 +149,7 @@ def _load_appearance():
     SPAWN_Y_PERCENT = max(0, min(90, num("spawn_y_percent", float, SPAWN_Y_PERCENT)))
     MAX_LINE_CHARS = max(0, num("max_line_chars", int, 0))
     SHOW_TITLE_CARD = bool(s.get("show_title_card", False))
+    HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", False))
 
 _load_appearance()
 
@@ -202,7 +202,7 @@ class LyricsApp:
         self._notice = None              # {"text", "kind", "until"} shown on the strip
         self._banner = None              # {"text", "until"}: version / update line, drawn over the lyrics too
         self._hover_since = 0.0
-        self._hover_last = None
+        self._meter = TextMeter()      # remembered text widths: the strip is redrawn 50 times a second
         self._show_border = False
         self._last_scene_sig = None
         self._last_full_redraw = 0.0
@@ -224,7 +224,6 @@ class LyricsApp:
         self.root.after(LINE_TICK_MS, self._line_tick)
 
         self._connect_player()
-        self._update_url = None
         self._update_release = None
         self._update_win = None
         if not os.environ.get("SPOTI_SELFTEST"):
@@ -418,7 +417,8 @@ class LyricsApp:
           it is remembered for next time.
         - No right-click menu: use the tray icon (lock, settings, quit).
         - The small padlock pins it in place; once locked, on Windows it also
-          becomes click-through. Whether it was locked is remembered too.
+          becomes click-through. Whether it was locked is remembered too. Settings can
+          hide the padlock, leaving the tray menu as the only way to lock and unlock.
         """
         self.desktop_mode = True
         self._clear_root()
@@ -569,7 +569,6 @@ class LyricsApp:
                 self._banner_after_current(lambda: self._set_banner(text, 5.0))
             return
         self._update_release = found
-        self._update_url = found["url"]
         if manual or updater.skipped_tag() != found["tag"]:
             self._offer_update(found)
         else:
@@ -688,20 +687,6 @@ class LyricsApp:
             win.destroy()
         except tk.TclError:
             pass
-
-    def _nudge_offset(self, delta_s):
-        global LYRIC_OFFSET_S
-        LYRIC_OFFSET_S = round(LYRIC_OFFSET_S + delta_s, 3)
-        config.update_appearance(lyric_offset_ms=int(round(LYRIC_OFFSET_S * 1000)))
-        log.info("lyric offset now %+.0f ms", LYRIC_OFFSET_S * 1000)
-
-    def _resize_desktop_text(self, delta):
-        self.desktop_curr_size = max(DESKTOP_CURR_MIN_SIZE, self.desktop_curr_size + delta)
-        self.desktop_next_size = max(DESKTOP_NEXT_MIN_SIZE, self.desktop_next_size + delta)
-        self._desktop_top_font.configure(size=self.desktop_curr_size)
-        self._desktop_next_font.configure(size=self.desktop_next_size)
-        self._measure_font.configure(size=self.desktop_curr_size)
-        self._rebuild_segments()   # how many characters fit on a line just changed
 
     # ------------------------------------------------------- lock / pin UI --
 
@@ -858,13 +843,6 @@ class LyricsApp:
             except tk.TclError:
                 pass
 
-    def _disable_transparency(self):
-        if sys.platform.startswith("win"):
-            try:
-                self.root.attributes("-transparentcolor", "")
-            except tk.TclError:
-                pass
-
     def _clear_root(self):
         self.root.unbind("<Configure>")
         for widget in self.root.winfo_children():
@@ -972,12 +950,14 @@ class LyricsApp:
 
         def work():
             asked = time.monotonic()
+            failed = False
             try:
                 result = fetch_lyrics(track["name"], track["artist"], track["album"], want)
             except Exception:
                 log.exception("lyrics re-lookup failed")
-                result = None
-            outage = not (result and result[0]) and outage_since(asked)
+                result, failed = None, True
+            # A site outage or a crash is not "no lyrics": keep what is already on the strip.
+            outage = failed or (not (result and result[0]) and outage_since(asked))
             self.post(lambda: self._relookup_done(tid, result, outage))
         threading.Thread(target=work, daemon=True, name="lyrics-relookup").start()
 
@@ -1263,13 +1243,28 @@ class LyricsApp:
             return None
         return x0 <= px < x0 + self.strip_w and y0 <= py < y0 + self.strip_h
 
+    def _lock_icon_allowed(self):
+        """False while "Hide the lock icon" is on. The tray menu is then the only way to lock or
+        unlock the strip, so if the tray icon isn't running the padlock is kept: otherwise a
+        locked (click-through) strip could never be unlocked again."""
+        if not HIDE_LOCK_ICON:
+            return True
+        if self.tray is None:
+            if not getattr(self, "_warned_hide_lock", False):
+                self._warned_hide_lock = True
+                log.warning("'hide lock icon' is on but there is no tray icon; keeping the padlock "
+                            "so the strip can still be unlocked")
+            return True
+        return False
+
     def _update_lock_icon_visibility(self):
         """Idle strip = only the lyrics: no frame, no lock icon. While the
         pointer is over the strip the small padlock appears (locked or not),
         and, when unlocked, a faint frame shows that it can be dragged. The
         global cursor position is used because a locked strip is
         click-through and never gets real hover events. The chrome lingers
-        for HOVER_HIDE_DELAY_S so the pointer can reach the icon."""
+        for HOVER_HIDE_DELAY_S so the pointer can reach the icon. With "Hide the lock
+        icon" on (see _lock_icon_allowed) the padlock never appears; the frame still does."""
         if self.lock_window is None:
             return
         over = self._pointer_over_strip()
@@ -1280,6 +1275,8 @@ class LyricsApp:
             self._hover_since = now
         show = over or (now - self._hover_since) < HOVER_HIDE_DELAY_S
         self._show_border = bool(show and not self.desktop_locked)
+        if show and not self._lock_icon_allowed():
+            show = False                 # the padlock is switched off in Settings
 
         if show and self._lock_icon_visible is not True:
             self._reposition_lock_icon()
@@ -1290,32 +1287,11 @@ class LyricsApp:
             self.lock_window.withdraw()
             self._lock_icon_visible = False
 
-    def _fit_font_size(self, font, text, base_size, min_size, max_width):
-        """Shrink `font` (in place) from base_size to whatever fits `text`
-        in max_width, stopping at min_size."""
-        if not text:
-            font.configure(size=base_size)
-            return base_size
-        size = base_size
-        font.configure(size=size)
-        while size > min_size and font.measure(text) > max_width:
-            size -= 1
-            font.configure(size=size)
-        return size
-
-    @staticmethod
-    def _ellipsize(font, text, max_width):
-        if font.measure(text) <= max_width:
-            return text
-        while len(text) > 1 and font.measure(text + "...") > max_width:
-            text = text[:-1]
-        return text.rstrip() + "..."
-
     def _wrap_top_text(self, font, text, max_width, max_lines=DESKTOP_MAX_LINES):
         """Last-resort wrap for a top line that still doesn't fit at the
         smallest allowed size (normally long lines are split into separate
         lines long before this)."""
-        if max_lines <= 1 or font.measure(text) <= max_width:
+        if max_lines <= 1 or self._meter.width(font, text) <= max_width:
             return [text]
 
         words = text.split(" ")
@@ -1325,7 +1301,7 @@ class LyricsApp:
         while i < len(words) and len(lines) < max_lines - 1:
             word = words[i]
             candidate = f"{current} {word}".strip()
-            if current and font.measure(candidate) > max_width:
+            if current and self._meter.width(font, candidate) > max_width:
                 lines.append(current)
                 current = ""
                 continue
@@ -1338,7 +1314,7 @@ class LyricsApp:
 
         final = []
         for line in lines:
-            if font.measure(line) <= max_width or " " in line:
+            if self._meter.width(font, line) <= max_width or " " in line:
                 final.append(line)
             else:
                 final.extend(self._hard_split_word(font, line, max_width))
@@ -1348,13 +1324,12 @@ class LyricsApp:
             final = head
         return final
 
-    @staticmethod
-    def _hard_split_word(font, word, max_width):
+    def _hard_split_word(self, font, word, max_width):
         chunks = []
         current = ""
         for ch in word:
             candidate = current + ch
-            if current and font.measure(candidate) > max_width:
+            if current and self._meter.width(font, candidate) > max_width:
                 chunks.append(current)
                 current = ch
             else:
@@ -1406,11 +1381,11 @@ class LyricsApp:
             anim_t = min(1.0, (time.perf_counter() - self._anim_start_perf) / LINE_ANIM_SECONDS)
         eased_t = _ease_out_cubic(anim_t)
 
-        target_size = self._fit_font_size(
+        target_size = self._meter.fit(
             self._desktop_top_font, top_text, self.desktop_curr_size,
             DESKTOP_CURR_MIN_SIZE, max_text_width,
         )
-        self._fit_font_size(
+        self._meter.fit(
             self._desktop_next_font, next_text, self.desktop_next_size,
             DESKTOP_NEXT_MIN_SIZE, max_text_width,
         )
@@ -1439,7 +1414,7 @@ class LyricsApp:
         reveal = max(0.0, min(1.0, (anim_t - 0.35) / 0.65))
         if next_text and reveal > 0.0:
             y = bottom_slot_y + (1.0 - _ease_out_cubic(reveal)) * self._px(12)
-            shown = self._ellipsize(self._desktop_next_font, next_text, max_text_width)
+            shown = self._meter.ellipsize(self._desktop_next_font, next_text, max_text_width)
             _draw_outlined_text(
                 canvas, center_x, y, shown, self._desktop_next_font,
                 _rgb_to_hex(DESKTOP_NEXT_RGB), next_outline, anchor="center", justify="center",
@@ -1448,14 +1423,14 @@ class LyricsApp:
     def _draw_banner_line(self, canvas, text):
         """Small line along the top edge, over the lyrics, for the version / update messages."""
         font = self._desktop_next_font
-        text = self._ellipsize(font, text, self.strip_w - self._px(DESKTOP_TEXT_MARGIN))
+        text = self._meter.ellipsize(font, text, self.strip_w - self._px(DESKTOP_TEXT_MARGIN))
         _draw_outlined_text(canvas, self.strip_w / 2, self._px(12), text, font, NOTICE_INFO_FG,
                             1.0 * self.scale, anchor="center", justify="center")
 
     def _draw_notice(self, canvas, notice):
         fg = NOTICE_ERROR_FG if notice["kind"] == "error" else NOTICE_INFO_FG
         font = self._desktop_next_font
-        text = self._ellipsize(font, notice["text"], self.strip_w - self._px(DESKTOP_TEXT_MARGIN))
+        text = self._meter.ellipsize(font, notice["text"], self.strip_w - self._px(DESKTOP_TEXT_MARGIN))
         _draw_outlined_text(
             canvas, self.strip_w / 2, self.strip_h / 2, text, font, fg, 1.0 * self.scale,
             anchor="center", justify="center",
@@ -1471,7 +1446,7 @@ class LyricsApp:
 
         # Cumulative prefix widths: positions taken this way match how the
         # whole string is laid out, so the outline lines up with the fill.
-        prefix = [font.measure(text[:i]) for i in range(len(text) + 1)]
+        prefix = self._meter.prefix(font, text)
         total_width = prefix[-1]
         start_x = center_x - total_width / 2
         fill_x = fraction * total_width

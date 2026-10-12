@@ -10,17 +10,6 @@ from .detect import char_class, detect_script
 
 __all__ = ["romanize_line", "needs_romanization", "detect_script", "char_class"]
 
-SUPPORTED_SCRIPTS = {
-    "ko": "Korean (Revised Romanization)",
-    "ja": "Japanese (Hepburn romaji)",
-    "zh": "Chinese (Mandarin pinyin with tone marks)",
-    "ar": "Arabic / Persian / Urdu",
-    "ru": "Cyrillic: Russian, Ukrainian, Bulgarian, Serbian...",
-    "el": "Greek",
-    "he": "Hebrew",
-    "hi": "Devanagari: Hindi, Marathi, Nepali",
-}
-
 def needs_romanization(text):
     """True if `text` contains any character from a supported non-Latin script."""
     return any(char_class(ch) for ch in text or "")

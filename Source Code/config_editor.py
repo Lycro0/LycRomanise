@@ -14,7 +14,6 @@ so there is no Save-and-restart step.
 
 import logging
 import os
-import sys
 import tkinter as tk
 from tkinter import colorchooser, messagebox
 
@@ -186,7 +185,9 @@ class ConfigEditor:
             anchor="w", pady=(0, 6)
         )
         self.title_var = tk.BooleanVar(value=bool(settings["show_title_card"]))
-        for text, var in (("Show 'Artist - Song' title card first", self.title_var),):
+        self.hide_lock_var = tk.BooleanVar(value=bool(settings["hide_lock_icon"]))
+        for text, var in (("Show 'Artist - Song' title card first", self.title_var),
+                          ("Hide the lock icon (lock and unlock from the tray menu only)", self.hide_lock_var)):
             tk.Checkbutton(
                 disp, text=text, variable=var, fg=FG, bg=BG, selectcolor=FIELD_BG,
                 activebackground=BG, activeforeground=FG, font=("Segoe UI", 10), anchor="w",
@@ -224,7 +225,7 @@ class ConfigEditor:
         self.preview_canvas.pack(fill="x")
         self._draw_preview()
         for row in (self.unsung_row, self.sung_row, self.next_row):
-            row.swatch.bind("<Button-1>", self._make_pick_and_refresh(row), add="+")
+            row.swatch.bind("<Button-1>", lambda _e: self._draw_preview(), add="+")
 
         self._built = True
         self._fit_window()
@@ -274,11 +275,6 @@ class ConfigEditor:
         except Exception:
             log.warning("couldn't size the settings window from its content", exc_info=True)
 
-    def _make_pick_and_refresh(self, row):
-        def handler(_event=None):
-            self._draw_preview()
-        return handler
-
     def _draw_preview(self):
         # Spinboxes/colour rows fire their change callback while the window is
         # still being built, before the preview canvas exists.
@@ -310,6 +306,7 @@ class ConfigEditor:
             "desktop_height": self.height_row.get(),
             "lyric_offset_ms": self.offset_row.get(),
             "show_title_card": bool(self.title_var.get()),
+            "hide_lock_icon": bool(self.hide_lock_var.get()),
             "outline_size": self._outline(),
         }
 
@@ -384,6 +381,7 @@ class ConfigEditor:
         self.height_row.var.set(defaults["desktop_height"])
         self.offset_row.var.set(defaults["lyric_offset_ms"])
         self.title_var.set(defaults["show_title_card"])
+        self.hide_lock_var.set(defaults["hide_lock_icon"])
         self.outline_var.set(defaults["outline_size"])
         self._draw_preview()
         self._save()

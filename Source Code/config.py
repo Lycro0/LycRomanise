@@ -36,6 +36,7 @@ DEFAULT_APPEARANCE = {
     "spawn_y_percent": 18,                  # first-launch height of the strip, % down the screen
     "max_line_chars": 0,                    # split lines longer than this (0 = automatic)
     "show_title_card": False,               # "Artist - Song" before the first lyric (off by default)
+    "hide_lock_icon": False,                # True: no padlock on the strip; lock/unlock from the tray menu only
 }
 
 
