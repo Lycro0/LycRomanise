@@ -1,4 +1,4 @@
-# LycRomanise v1.4.1
+# LycRomanise v1.4.2
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -60,7 +60,11 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
   a phone/tablet on the same Wi-Fi (or scan the QR code from "Show address / QR code…"). The page shows the same karaoke line,
   next line and title card with your colours and outline. Tap it once for full screen.
   **OBS:** add a Browser source with `http://<this PC's address>:8765/obs` for a transparent, lyrics-only page (add `?scale=2` to
-  make the text bigger; the default is 1.5). Set the source size to match your scene. The port can be changed (`mobile_port`).
+  make the text bigger; the default is 1.5). Set the source size to match your scene. The page is transparent in OBS
+  (OBS browser sources are detected automatically, so even the plain address is see-through there).
+- **Hide the lyrics on this PC** (`hide_desktop_strip`): tick it in Settings when you only want the lyrics in the OBS
+  browser source or on phones. The strip then draws nothing on your screen. It only applies while the Mobile view is on.
+- **Reset lyrics position:** the button in Settings puts the strip back in its default place (centred near the top). The port can be changed (`mobile_port`).
   Windows may ask to allow LycRomanise through the firewall the first time: allow it on Private networks. Nothing is sent
   outside your network, and only the lyric text currently on the strip is served.
 - **Start with Windows** adds a per-user startup entry (no admin rights needed).

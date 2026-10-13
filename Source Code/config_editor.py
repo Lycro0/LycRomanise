@@ -111,8 +111,9 @@ class SizeRow(tk.Frame):
 
 
 class ConfigEditor:
-    def __init__(self, root, on_apply=None):
+    def __init__(self, root, on_apply=None, on_reset_position=None):
         self.root = root
+        self.on_reset_position = on_reset_position
         self.on_apply = on_apply     # optional: called right after each save (the app also watches the file)
         self._apply_job = None
         self.root.title("LycRomanise v%s — Settings" % __import__("version").__version__)
@@ -205,6 +206,17 @@ class ConfigEditor:
                 activebackground=BG, activeforeground=FG, font=("Segoe UI", 10), anchor="w",
                 command=self._changed,
             ).pack(fill="x")
+        self.hide_strip_var = tk.BooleanVar(value=bool(settings["hide_desktop_strip"]))
+        tk.Checkbutton(
+            disp, text="Hide the lyrics on this PC (only use them in the OBS browser source / on phones)",
+            variable=self.hide_strip_var, fg=FG, bg=BG, selectcolor=FIELD_BG, activebackground=BG,
+            activeforeground=FG, font=("Segoe UI", 10), anchor="w", command=self._changed,
+        ).pack(fill="x")
+        tk.Label(disp, text="Only takes effect while 'Show the lyrics on phones and tablets' (Mobile view, below) is on.",
+                 fg=FG_DIM, bg=BG, font=("Segoe UI", 9), anchor="w", justify="left", wraplength=360).pack(fill="x", padx=(24, 0))
+        tk.Button(disp, text="Reset lyrics position to the default place", command=self._reset_position,
+                  bg=FIELD_BG, fg=FG, activebackground=FIELD_BG, font=("Segoe UI", 10), relief="flat",
+                  padx=10, pady=4, cursor="hand2").pack(anchor="w", pady=(6, 4))
         self.outline_var = tk.DoubleVar(value=float(settings["outline_size"]))
         out_row = tk.Frame(disp, bg=BG)
         out_row.pack(fill="x", pady=2)
@@ -346,9 +358,22 @@ class ConfigEditor:
             "show_in_taskbar": bool(self.taskbar_var.get()),
             "outline_size": self._outline(),
             "outline_rgb": self.outline_row.rgb,
+            "hide_desktop_strip": bool(self.hide_strip_var.get()),
             "mobile_enabled": bool(self.mobile_var.get()),
             "mobile_port": self.port_row.get(),
         }
+
+    def _reset_position(self):
+        """Move the strip back to its default place (live when the app is running)."""
+        try:
+            if self.on_reset_position:
+                self.on_reset_position()
+            else:
+                config.reset_window_position()
+                messagebox.showinfo("Lyrics position", "The position was reset. It applies the next time LycRomanise starts.")
+        except Exception:
+            log.exception("couldn't reset the position")
+            messagebox.showerror("Lyrics position", "Couldn't reset the position. See logs/spoti-lyrics.log.")
 
     def _show_mobile(self):
         import mobile_dialog
@@ -433,6 +458,7 @@ class ConfigEditor:
         self.taskbar_var.set(defaults["show_in_taskbar"])
         self.outline_var.set(defaults["outline_size"])
         self.mobile_var.set(defaults["mobile_enabled"])
+        self.hide_strip_var.set(defaults["hide_desktop_strip"])
         self.port_row.var.set(defaults["mobile_port"])
         self._draw_preview()
         self._save()

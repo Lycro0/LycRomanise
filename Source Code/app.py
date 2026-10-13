@@ -81,9 +81,9 @@ DESKTOP_NEXT_RGB = (255, 225, 77)
 DESKTOP_WIDTH = 720
 DESKTOP_HEIGHT = 150
 DESKTOP_CURR_SIZE = 26
-DESKTOP_NEXT_SIZE = 17
+DESKTOP_NEXT_SIZE = 19
 DESKTOP_CURR_MIN_SIZE = 13
-DESKTOP_NEXT_MIN_SIZE = 11
+DESKTOP_NEXT_MIN_SIZE = 12
 DESKTOP_TEXT_MARGIN = 40     # side margin (both sides combined) text must fit within
 DESKTOP_MAX_LINES = 2        # a line too wide for the strip wraps onto at most this many rows
 OUTLINE_SIZE = 1.5
@@ -91,6 +91,7 @@ SPAWN_Y_PERCENT = 18
 MAX_LINE_CHARS = 0
 SHOW_TITLE_CARD = True
 HIDE_LOCK_ICON = True        # no padlock on the strip; lock and unlock from the tray menu only
+HIDE_DESKTOP_STRIP = False  # no lyrics on this PC (OBS browser source / phones only); only honoured while the mobile view is on
 MOBILE_ENABLED = False       # built-in web page for phones/tablets (Settings -> Mobile view)
 MOBILE_PORT = mobile_server.DEFAULT_PORT
 OUTLINE_RGB = (0, 0, 0)      # text border colour; also used by the title card and the next line
@@ -135,7 +136,7 @@ def _load_appearance():
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
     global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
     global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
-    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR, MOBILE_ENABLED, MOBILE_PORT, OUTLINE_RGB
+    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR, MOBILE_ENABLED, MOBILE_PORT, OUTLINE_RGB, HIDE_DESKTOP_STRIP
 
     def num(key, cast, default):
         try:
@@ -161,6 +162,7 @@ def _load_appearance():
     HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", True))
     SHOW_IN_TASKBAR = bool(s.get("show_in_taskbar", False))
     MOBILE_ENABLED = bool(s.get("mobile_enabled", False))
+    HIDE_DESKTOP_STRIP = bool(s.get("hide_desktop_strip", False))
     MOBILE_PORT = max(1024, min(65535, num("mobile_port", int, mobile_server.DEFAULT_PORT)))
     try:
         OUTLINE_RGB = tuple(int(c) for c in s.get("outline_rgb", OUTLINE_RGB))[:3]
@@ -230,6 +232,7 @@ class LyricsApp:
         self._tray_state = (False, False, False)
         self._mobile = mobile_server.MobileServer(APP_NAME)
         self._mobile_next_publish = 0.0
+        self._tray_tried = False
         self.player = None
         self._polling = False
         self._poll_busy = False
@@ -563,6 +566,7 @@ class LyricsApp:
     def start_tray(self):
         """Create the tray icon. Its actions are posted to the Tk thread."""
         self._snapshot_tray_state()
+        self._tray_tried = True
         self.tray = tray.TrayIcon(
             actions={
                 "toggle_lock": self._toggle_lock,
@@ -619,6 +623,25 @@ class LyricsApp:
                                  % (self._mobile.error or "see the log"), "error", seconds=10)
         except Exception:
             log.exception("couldn't apply the mobile view setting")
+
+    def _desktop_hidden(self):
+        """True when the strip should draw nothing on this PC: "hide" is ticked, the mobile/OBS page is on (it is
+        the only place the lyrics go), and there is a tray icon to bring the strip back."""
+        return bool(HIDE_DESKTOP_STRIP and MOBILE_ENABLED and self._mobile.running
+                    and not (self._tray_tried and self.tray is None))
+
+    def reset_position(self):
+        """Put the strip back in its default place (centred, SPAWN_Y_PERCENT down the screen)."""
+        try:
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            x, y = (sw - self.strip_w) // 2, int(sh * SPAWN_Y_PERCENT / 100)
+            self.root.geometry(f"{self.strip_w}x{self.strip_h}+{x}+{y}")
+            self._reposition_lock_icon()
+            self._save_window_state()
+            self._set_banner("Lyrics position reset", 3.0)
+            log.info("strip position reset to the default place (%d, %d)", x, y)
+        except Exception:
+            log.exception("couldn't reset the strip position")
 
     def _toggle_mobile(self):
         config.update_appearance(mobile_enabled=not MOBILE_ENABLED)
@@ -776,7 +799,7 @@ class LyricsApp:
             import config_editor
             win = tk.Toplevel(self.root)
             win.attributes("-topmost", True)   # the strip is topmost too; stay above it
-            config_editor.ConfigEditor(win, on_apply=self.reload_appearance)
+            config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_reset_position=self.reset_position)
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(win))
             self._settings_window = win
             win.focus_force()
@@ -1372,6 +1395,11 @@ class LyricsApp:
         icon" on (see _lock_icon_allowed) the padlock never appears; the frame still does."""
         if self.lock_window is None:
             return
+        if self._desktop_hidden():
+            if self._lock_icon_visible is not False:
+                self.lock_window.withdraw()
+                self._lock_icon_visible = False
+            return
         over = self._pointer_over_strip()
         if over is None:
             return
@@ -1456,7 +1484,8 @@ class LyricsApp:
             self._paint_scene(self.desktop_canvas)
             return
         # True transparency: the same drawing code paints into an image that is handed to Windows.
-        self._alpha.begin(self.strip_w, self.strip_h, hit_testable=not self.desktop_locked)
+        self._alpha.begin(self.strip_w, self.strip_h,
+                          hit_testable=not (self.desktop_locked or self._desktop_hidden()))
         try:
             self._paint_scene(self._alpha)
             self._alpha.commit()
@@ -1470,6 +1499,8 @@ class LyricsApp:
 
     def _paint_scene(self, canvas):
         canvas.delete("all")
+        if self._desktop_hidden():
+            return       # lyrics are shown on the OBS / phone page only: a completely clear strip
 
         if not self.desktop_locked:
             # Unlocked: a white frame all round so the strip is easy to see and grab. Pillow draws a

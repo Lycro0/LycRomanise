@@ -1,4 +1,4 @@
-"""LycRomanise mobile view (v1.4.0).
+"""LycRomanise mobile view (v1.4.2).
 
 A tiny built-in web server so a phone or tablet on the same Wi-Fi can show the lyrics: open
 http://<this PC's address>:<port> in Safari / Chrome and the page draws the same karaoke line, next
@@ -70,7 +70,13 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             if path in ("/", "/index.html", "/obs"):
-                self._send(200, PAGE.replace("__APP__", self.server.app_name), "text/html; charset=utf-8")
+                page = PAGE.replace("__APP__", self.server.app_name)
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                if path == "/obs" or any(p.split("=")[0] in ("obs", "transparent") for p in query.split("&")):
+                    # transparent from the very first byte, no JavaScript needed to get rid of the background
+                    page = page.replace('<html lang="en">', '<html lang="en" class="obs" style="background:transparent">', 1)
+                    page = page.replace("<body>", '<body style="background:transparent">', 1)
+                self._send(200, page, "text/html; charset=utf-8")
             elif path == "/state":
                 self._send(200, json.dumps(self.server.snapshot(), ensure_ascii=False),
                            "application/json; charset=utf-8")
@@ -160,6 +166,17 @@ PAGE = r"""<!doctype html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="theme-color" content="#000000">
 <title>__APP__</title>
+<script>
+  /* OBS mode as early as possible: OBS Browser sources always have window.obsstudio, so even the plain address
+     is transparent there; /obs, ?obs=1 or ?transparent=1 force it in any browser. */
+  (function () {
+    var q = location.search;
+    if (window.obsstudio || /^\/obs/.test(location.pathname) || /[?&](obs|transparent)(=|&|$)/.test(q)) {
+      window.__OBS = true;
+      document.documentElement.className += ' obs';
+    }
+  })();
+</script>
 <style>
   :root { --sung:#ff3d9a; --unsung:#ffe14d; --next:#ffe14d; --ol:#000; --olw:3px; --olwn:2px; }
   [hidden] { display:none !important; }
@@ -173,10 +190,10 @@ PAGE = r"""<!doctype html>
   .ln::before { content: attr(data-t); position:absolute; left:0; right:0; top:0; z-index:0; color:var(--ol);
                 -webkit-text-stroke: var(--w) var(--ol); pointer-events:none; }
   .ln > span { position:relative; z-index:1; }
-  html.obs, html.obs body { background: transparent; }
+  html.obs, html.obs body, html.obs #stage { background: transparent !important; background-color: transparent !important; }
   html.obs #idle { display:none !important; }
   #top { font-size: calc(clamp(24px, 7.2vw, 48px) * var(--k, 1)); --w: var(--olw); }
-  #next { font-size: calc(clamp(16px, 4.6vw, 30px) * var(--k, 1)); margin-top: 3.5vh; --w: var(--olwn); }
+  #next { font-size: calc(clamp(18px, 5.2vw, 34px) * var(--k, 1)); margin-top: 3.5vh; --w: var(--olwn); }
   #top > span { color:transparent; -webkit-text-fill-color:transparent; -webkit-background-clip:text; background-clip:text; }
   #next > span { color: var(--next); }
   .rise { animation: rise .28s cubic-bezier(.2,.7,.2,1); }
@@ -196,7 +213,7 @@ PAGE = r"""<!doctype html>
   var top = document.getElementById('top'), next = document.getElementById('next'), idle = document.getElementById('idle');
   var topSpan = top.firstElementChild, nextSpan = next.firstElementChild;
   // OBS mode: open /obs (or ?obs=1). Transparent background, no status text; ?scale=2 makes the text bigger.
-  var OBS = /^\/obs/.test(location.pathname) || /[?&]obs(=|&|$)/.test(location.search);
+  var OBS = !!window.__OBS;
   if (OBS) {
     document.documentElement.classList.add('obs');
     var m = /[?&]scale=([0-9.]+)/.exec(location.search);

@@ -20,6 +20,7 @@ ICON_PATH = os.path.join(_RES_DIR, "assets", "lyrics-overlay.ico")
 
 # Appearance/behaviour settings live in appearance.json. Edit it by hand, or with the Settings window.
 TITLE_CARD_MARKER = "_title_card_off_v2"   # set once appearance.json was saved by this version
+NEXT_SIZE_MARKER = "_next_size_v1_4_2"      # set once the next-line size default (17 -> 19) was applied
 RESET_MARKER = "_defaults_reset_v1_3_2"    # set once every setting was reset to the defaults (v1.3.2)
 defaults_were_reset = False                # True during the run in which that one-time reset happened
 DEFAULT_APPEARANCE = {
@@ -28,9 +29,9 @@ DEFAULT_APPEARANCE = {
     "next_line_rgb": [255, 225, 77],        # #ffe14d — next-line preview
     "desktop_bg": "#000000",
     "curr_font_size": 26,
-    "next_font_size": 17,
+    "next_font_size": 19,
     "curr_font_min_size": 13,
-    "next_font_min_size": 11,
+    "next_font_min_size": 12,
     "desktop_width": 720,
     "desktop_height": 150,
     "lyric_offset_ms": 0,                   # +ve = lyrics appear earlier, -ve = later
@@ -40,6 +41,7 @@ DEFAULT_APPEARANCE = {
     "max_line_chars": 0,                    # split lines longer than this many characters (0 = never: lines stay whole, as timed by the lyrics site)
     "show_title_card": True,                # "Artist - Song" card (about 10 s, or until the first lyric starts)
     "hide_lock_icon": True,                 # True: no padlock on the strip; lock/unlock from the tray menu only
+    "hide_desktop_strip": False,            # True: no lyrics on this PC (they are only served to the OBS / phone page); needs mobile_enabled
     "mobile_enabled": False,                # True: also show the lyrics on phones/tablets on the same Wi-Fi (built-in web page)
     "mobile_port": 8765,                    # port of that web page
     "show_in_taskbar": False,               # True: the strip also has a taskbar button (so OBS and other tools can list it); applies live
@@ -83,6 +85,12 @@ def load_appearance():
                 return data
             if isinstance(loaded, dict):
                 data.update(loaded)
+                if not loaded.get(NEXT_SIZE_MARKER):
+                    # v1.4.2: the next line is a little bigger. Only settings still on the old default move.
+                    if loaded.get("next_font_size") == 17:
+                        data["next_font_size"] = DEFAULT_APPEARANCE["next_font_size"]
+                    if loaded.get("next_font_min_size") == 11:
+                        data["next_font_min_size"] = DEFAULT_APPEARANCE["next_font_min_size"]
                 if not loaded.get(TITLE_CARD_MARKER):
                     # One-time reset: the title card is now off for everyone.
                     # Turning it back on in Settings sticks (save adds the marker).
@@ -98,6 +106,7 @@ def save_appearance(data):
     clean = {k: data[k] for k in DEFAULT_APPEARANCE if k in data}
     clean[TITLE_CARD_MARKER] = True
     clean[RESET_MARKER] = True
+    clean[NEXT_SIZE_MARKER] = True
     with open(APPEARANCE_PATH, "w", encoding="utf-8") as f:
         json.dump(clean, f, indent=2)
 
@@ -110,6 +119,13 @@ def update_appearance(**changes):
         save_appearance(settings)
     except Exception as exc:  # cosmetics must never crash the app
         log.warning("couldn't save settings %s: %s", list(changes), exc)
+
+def reset_window_position():
+    """Forget the saved strip position (keeps the lock state), so the next start uses the default place."""
+    state = load_window_state()
+    state.pop("x", None)
+    state.pop("y", None)
+    save_window_state(state)
 
 def load_window_state():
     """{'x': int, 'y': int, 'locked': bool} from the last session, or {}."""
