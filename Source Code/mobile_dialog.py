@@ -55,6 +55,13 @@ def show(parent, port, enabled=True):
     field.insert(0, url)
     field.configure(state="readonly")
     field.pack(fill="x", padx=20, ipady=6)
+    tk.Label(win, text="OBS / streaming: add a Browser source with the address below (transparent, lyrics only).",
+             fg=FG_DIM, bg=BG, font=("Segoe UI", 9), wraplength=320).pack(padx=20, pady=(8, 2))
+    obs = tk.Entry(win, font=("Consolas", 11), justify="center", bg=FIELD_BG, fg=FG, relief="flat",
+                   readonlybackground=FIELD_BG)
+    obs.insert(0, url + "/obs")
+    obs.configure(state="readonly")
+    obs.pack(fill="x", padx=20, ipady=4)
     photo = _qr_photo(url)
     if photo is not None:
         lbl = tk.Label(win, image=photo, bg="#ffffff", bd=6, relief="flat")

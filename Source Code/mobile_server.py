@@ -69,7 +69,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         try:
-            if path in ("/", "/index.html"):
+            if path in ("/", "/index.html", "/obs"):
                 self._send(200, PAGE.replace("__APP__", self.server.app_name), "text/html; charset=utf-8")
             elif path == "/state":
                 self._send(200, json.dumps(self.server.snapshot(), ensure_ascii=False),
@@ -173,8 +173,10 @@ PAGE = r"""<!doctype html>
   .ln::before { content: attr(data-t); position:absolute; left:0; right:0; top:0; z-index:0; color:var(--ol);
                 -webkit-text-stroke: var(--w) var(--ol); pointer-events:none; }
   .ln > span { position:relative; z-index:1; }
-  #top { font-size: clamp(24px, 7.2vw, 48px); --w: var(--olw); }
-  #next { font-size: clamp(16px, 4.6vw, 30px); margin-top: 3.5vh; --w: var(--olwn); }
+  html.obs, html.obs body { background: transparent; }
+  html.obs #idle { display:none !important; }
+  #top { font-size: calc(clamp(24px, 7.2vw, 48px) * var(--k, 1)); --w: var(--olw); }
+  #next { font-size: calc(clamp(16px, 4.6vw, 30px) * var(--k, 1)); margin-top: 3.5vh; --w: var(--olwn); }
   #top > span { color:transparent; -webkit-text-fill-color:transparent; -webkit-background-clip:text; background-clip:text; }
   #next > span { color: var(--next); }
   .rise { animation: rise .28s cubic-bezier(.2,.7,.2,1); }
@@ -193,6 +195,13 @@ PAGE = r"""<!doctype html>
 (function () {
   var top = document.getElementById('top'), next = document.getElementById('next'), idle = document.getElementById('idle');
   var topSpan = top.firstElementChild, nextSpan = next.firstElementChild;
+  // OBS mode: open /obs (or ?obs=1). Transparent background, no status text; ?scale=2 makes the text bigger.
+  var OBS = /^\/obs/.test(location.pathname) || /[?&]obs(=|&|$)/.test(location.search);
+  if (OBS) {
+    document.documentElement.classList.add('obs');
+    var m = /[?&]scale=([0-9.]+)/.exec(location.search);
+    document.documentElement.style.setProperty('--k', String(Math.max(0.3, Math.min(6, m ? parseFloat(m[1]) : 1.5))));
+  }
   var st = null, got = 0, shownId = null, shownNext = null, lastOk = 0, lastTop = '';
 
   function setText(el, span, text) { span.textContent = text; el.setAttribute('data-t', text); }
@@ -255,11 +264,11 @@ PAGE = r"""<!doctype html>
       .then(function () { setTimeout(poll, 120); });
   }
 
-  document.addEventListener('click', function () {      // tap = full screen where the browser allows it
+  if (!OBS) document.addEventListener('click', function () {      // tap = full screen where the browser allows it
     var el = document.documentElement;
     try { if (!document.fullscreenElement && el.requestFullscreen) el.requestFullscreen(); } catch (e) {}
   });
-  if (navigator.wakeLock && window.isSecureContext) {
+  if (!OBS && navigator.wakeLock && window.isSecureContext) {
     var keepAwake = function () { navigator.wakeLock.request('screen').catch(function () {}); };
     keepAwake(); document.addEventListener('visibilitychange', function () { if (!document.hidden) keepAwake(); });
   }
