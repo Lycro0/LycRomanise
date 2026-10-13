@@ -1,4 +1,4 @@
-# LycRomanise v1.3.1
+# LycRomanise v1.3.2
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -40,13 +40,14 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
   position). If the tray icon isn't running, the padlock is kept so the strip can still be unlocked.
 - **Show it in OBS:** add a Window Capture source and pick "LycRomanise Lyrics" (capture method "Windows 10
   (1903 and later)"). The strip has real per-pixel transparency by default, so OBS shows it see-through with no
-  filter. To go back to the old colour-key strip, untick "True transparency" in Settings (`true_transparency`)
-  and restart; then OBS sees a black background and needs a Color Key filter set to black. If the strip ever
-  fails to draw with true transparency, the app logs it and falls back to the old strip by itself.
+  filter. If OBS still doesn't list it, turn on "Show a taskbar button for the strip" in Settings
+  (`show_in_taskbar`, applies live). If the strip ever fails to draw with true transparency (or Pillow / Segoe UI
+  is missing), the app logs it and falls back to the old colour-key strip, which OBS shows with a black
+  background (add a Color Key filter set to black).
 - **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Check for updates, Open logs
-  folder, Quit. There is no taskbar button and no right-click menu.
+  folder, Quit. By default there is no taskbar button (see "Show a taskbar button" in Settings) and no right-click menu.
 - **Settings…** (from the tray) changes karaoke colors, next-line color, font sizes, strip width and
-  height, lyric offset, outline, the title card, hiding the lock icon and Start with Windows. Changes apply live and are saved
+  height, lyric offset, outline, the title card, hiding the lock icon, the taskbar button and Start with Windows. Changes apply live and are saved
   to `appearance.json`. "Reset to defaults" restores the built-in look.
 - **Lyric offset** shifts all lyrics in 100 ms steps (`lyric_offset_ms`).
 - **Title card** (off by default): turn on `show_title_card` to show "Artist - Song" before the first line.

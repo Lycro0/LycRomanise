@@ -82,13 +82,13 @@ DESKTOP_NEXT_SIZE = 17
 DESKTOP_CURR_MIN_SIZE = 13
 DESKTOP_NEXT_MIN_SIZE = 11
 DESKTOP_TEXT_MARGIN = 40     # side margin (both sides combined) text must fit within
-DESKTOP_MAX_LINES = 2        # last-resort wrap of the top line (long lines are normally split first)
+DESKTOP_MAX_LINES = 2        # a line too wide for the strip wraps onto at most this many rows
 OUTLINE_SIZE = 1.5
 SPAWN_Y_PERCENT = 18
 MAX_LINE_CHARS = 0
-SHOW_TITLE_CARD = False
-HIDE_LOCK_ICON = False       # no padlock on the strip; lock and unlock from the tray menu only
-TRUE_TRANSPARENCY = True     # real per-pixel alpha instead of a colour key (alpha_window.py); needs a restart
+SHOW_TITLE_CARD = True
+HIDE_LOCK_ICON = True        # no padlock on the strip; lock and unlock from the tray menu only
+SHOW_IN_TASKBAR = False      # also show a taskbar button for the strip (so OBS can list it); applies live
 
 # Karaoke fill: the current line starts yellow (not-yet-sung) and turns pink
 # left to right as playback reaches it, blended across a band scaled to the
@@ -108,7 +108,8 @@ KARAOKE_MIN_FILL_SECONDS = 0.6
 LOCK_ICON_BG = "#1a1a1a"
 LOCK_ICON_FG = "#b8b8b8"
 LOCK_ICON_SIZE = (22, 22)
-HOVER_BORDER_RGB = "#2c2c2c"   # faint frame, only while the pointer is over an unlocked strip
+UNLOCKED_FRAME_RGB = "#ffffff"  # frame shown all round the strip while it is unlocked
+UNLOCKED_FRAME_PX = 5
 HOVER_HIDE_DELAY_S = 0.6       # chrome lingers briefly so the pointer can reach the lock icon
 NOTICE_ERROR_FG = "#ff8a8a"
 NOTICE_INFO_FG = "#cfcfcf"
@@ -128,7 +129,7 @@ def _load_appearance():
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
     global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
     global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
-    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, TRUE_TRANSPARENCY
+    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR
 
     def num(key, cast, default):
         try:
@@ -149,10 +150,10 @@ def _load_appearance():
     LYRIC_OFFSET_S = num("lyric_offset_ms", float, 0.0) / 1000.0
     OUTLINE_SIZE = max(0.0, min(4.0, num("outline_size", float, OUTLINE_SIZE)))
     SPAWN_Y_PERCENT = max(0, min(90, num("spawn_y_percent", float, SPAWN_Y_PERCENT)))
-    MAX_LINE_CHARS = max(0, num("max_line_chars", int, 0))
-    SHOW_TITLE_CARD = bool(s.get("show_title_card", False))
-    HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", False))
-    TRUE_TRANSPARENCY = bool(s.get("true_transparency", True))
+    MAX_LINE_CHARS = max(0, min(200, num("max_line_chars", int, 0)))
+    SHOW_TITLE_CARD = bool(s.get("show_title_card", True))
+    HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", True))
+    SHOW_IN_TASKBAR = bool(s.get("show_in_taskbar", False))
 
 _load_appearance()
 
@@ -193,7 +194,7 @@ class LyricsApp:
         self.lock_icon_label = None
         self._lock_icon_visible = None
         self.desktop_canvas = None
-        self._alpha = None             # alpha_window.AlphaStrip when "true transparency" is on
+        self._alpha = None             # alpha_window.AlphaStrip (true transparency); None = colour-key fallback
         self._anim_start_perf = None
 
         # --- playback timing (interpolated between polls)
@@ -363,10 +364,10 @@ class LyricsApp:
         font sizes, strip size, outline, offset and title card, with
         no restart."""
         old_bg, old_w, old_h = DESKTOP_BG, DESKTOP_WIDTH, DESKTOP_HEIGHT
-        old_alpha = TRUE_TRANSPARENCY
+        old_taskbar = SHOW_IN_TASKBAR
         _load_appearance()
-        if TRUE_TRANSPARENCY != old_alpha:
-            self._set_notice("Restart LycRomanise to apply the transparency change", "info", seconds=8)
+        if SHOW_IN_TASKBAR != old_taskbar and self._alpha is not None:
+            self._alpha.set_taskbar(SHOW_IN_TASKBAR)
         self._refresh_tray()
         self.desktop_curr_size = DESKTOP_CURR_SIZE
         self.desktop_next_size = DESKTOP_NEXT_SIZE
@@ -455,10 +456,11 @@ class LyricsApp:
         self._measure_font = tkfont.Font(family="Segoe UI", size=self.desktop_curr_size, weight="bold")
 
         self._alpha = None
-        if TRUE_TRANSPARENCY and sys.platform.startswith("win"):
+        if sys.platform.startswith("win"):
             if alpha_window.available():
                 try:
                     self._alpha = alpha_window.AlphaStrip(self.root, self._meter)
+                    self._alpha.taskbar = SHOW_IN_TASKBAR
                     log.info("true transparency is on")
                 except Exception:
                     log.exception("true transparency couldn't start; using the normal strip")
@@ -966,11 +968,15 @@ class LyricsApp:
             return
         if self._relookups >= 2 or self._relookup_busy or self.lyrics_state == "pending":
             return
-        # Windows can report the next song's length a moment before its title: only act when the
-        # new length is still there, for the same song, on the next poll.
+        # Windows can report the next song's length a moment before its title (the log showed the
+        # old title being looked up with the next song's length): only act once the new length has
+        # held, for the same song, for several seconds.
         key = round(want / 1000.0)
+        now = time.monotonic()
         if self._len_candidate is None or self._len_candidate[0] != key:
-            self._len_candidate = (key, 1)
+            self._len_candidate = (key, now)
+            return
+        if now - self._len_candidate[1] < 4.0:
             return
         self._len_candidate = None
         tid, self._relookups, self._relookup_busy = self.current_track_id, self._relookups + 1, True
@@ -1135,19 +1141,11 @@ class LyricsApp:
     # ---------------------------------------------------- segments / layout --
 
     def _max_chars(self):
-        """How many characters fit on the top line before it gets split."""
-        if MAX_LINE_CHARS > 0:
-            return MAX_LINE_CHARS
-        font = getattr(self, "_measure_font", None)
-        if font is None or not self.desktop_mode:
-            return 42
-        try:
-            sample = "The quick brown fox jumps over"
-            avg = font.measure(sample) / len(sample)
-            usable = self.strip_w - self._px(DESKTOP_TEXT_MARGIN)
-            return max(20, min(80, int(usable / max(avg, 1) * 0.95)))
-        except tk.TclError:
-            return 42
+        """Lines are shown whole, exactly as the lyrics site times them (0 = never split). Only when
+        the user sets "Split lines longer than" in Settings are long lines cut into pieces; the
+        later pieces then start at a guessed time. A whole line too wide for the strip is wrapped
+        (and the font shrunk) when it is drawn."""
+        return MAX_LINE_CHARS if MAX_LINE_CHARS > 0 else 0
 
     def _line_display(self, i):
         """Text of lyric line i as displayed (romanized when it needs it)."""
@@ -1249,7 +1247,7 @@ class LyricsApp:
             self._redraw_desktop_canvas()
             # Full Windows repaint only when what's shown changed (or every
             # REDRAW_KEEPALIVE_S): invalidating with erase every 40 ms flickers.
-            sig = (self._scene(), bool(self._show_border), (self._active_notice() or {}).get("text"),
+            sig = (self._scene(), bool(self.desktop_locked), (self._active_notice() or {}).get("text"),
                    (self._active_banner() or {}).get("text"))
             now = time.perf_counter()
             if sig != self._last_scene_sig or now - self._last_full_redraw > REDRAW_KEEPALIVE_S:
@@ -1396,10 +1394,13 @@ class LyricsApp:
     def _paint_scene(self, canvas):
         canvas.delete("all")
 
-        if self._show_border:
-            canvas.create_rectangle(
-                0, 0, self.strip_w - 1, self.strip_h - 1, outline=HOVER_BORDER_RGB, width=1,
-            )
+        if not self.desktop_locked:
+            # Unlocked: a white frame all round so the strip is easy to see and grab. Pillow draws a
+            # wide outline inwards from the rectangle; the Tk canvas centres it on the line.
+            bw = max(2, int(round(UNLOCKED_FRAME_PX * self.scale)))
+            inset = 0 if canvas is self._alpha else bw / 2.0
+            canvas.create_rectangle(inset, inset, self.strip_w - 1 - inset, self.strip_h - 1 - inset,
+                                    outline=UNLOCKED_FRAME_RGB, width=bw)
 
         scene = self._scene()
         notice = self._active_notice()
@@ -1512,6 +1513,22 @@ class LyricsApp:
             color = _rgb_to_hex(_lerp_rgb(KARAOKE_SUNG_RGB, KARAOKE_UNSUNG_RGB, t))
             canvas.create_text(x, y, text=ch, font=font, fill=color, anchor="nw")
 
+def _default_autostart_on_first_run():
+    """'Start with Windows' is on by default: switch it on once for a brand-new install (no settings
+    file yet). The marker means a later "off" is never overridden."""
+    marker = os.path.join(config.BASE_DIR, "autostart_default_done")
+    try:
+        if os.path.exists(marker):
+            return
+        fresh = not os.path.exists(config.APPEARANCE_PATH) or config.defaults_were_reset
+        if fresh and winsys.is_windows() and not winsys.autostart_enabled():
+            winsys.set_autostart(True)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("1")
+    except Exception:
+        log.exception("couldn't apply the default for 'Start with Windows'")
+
+
 def main():
     if "--selftest" in sys.argv[1:]:
         sys.exit(run_selftest())
@@ -1524,6 +1541,7 @@ def main():
         log.info("another copy is already running; exiting")
         return
     winsys.refresh_autostart()          # keep the Run entry pointing at where the app is now
+    _default_autostart_on_first_run()
     if winsys.env_flag("SPOTI_DEBUG_NO_DPI"):
         dpi = None
         log.warning("SPOTI_DEBUG_NO_DPI set: not enabling DPI awareness")

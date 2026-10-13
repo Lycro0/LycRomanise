@@ -1,7 +1,7 @@
-"""True per-pixel transparency for the lyrics strip (opt-in: "true_transparency" in Settings).
+"""True per-pixel transparency for the lyrics strip (always used when Pillow and Segoe UI are there).
 
-By default the strip is see-through because Windows hides one colour (a colour key). That is fine on
-screen, but OBS records the hidden colour as plain black. With this on, the strip is drawn as an
+The old strip was see-through because Windows hid one colour (a colour key). That is fine on
+screen, but OBS records the hidden colour as plain black. So the strip is drawn as an
 image with a real alpha channel and handed to Windows with UpdateLayeredWindow, so the same
 window is see-through everywhere, including OBS Window Capture.
 
@@ -24,6 +24,7 @@ except Exception:                      # Pillow missing: the feature is simply u
 
 OUTLINE_RGBA = (1, 1, 1, 255)
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
 WS_POPUP = 0x80000000
 GWLP_HWNDPARENT = -8
 SW_HIDE, SW_SHOWNA = 0, 8
@@ -155,6 +156,7 @@ class AlphaStrip(StripRenderer):
         import winsys
         super().__init__(meter, dpi=root.winfo_fpixels("1i"))
         self.root, self.failed = root, False
+        self.taskbar = False             # True: the strip gets its own taskbar button
         self._ct, self._wt, self._winsys = ctypes, wintypes, winsys
         self._api = winsys._hwnd_api()
         self._ulw = ctypes.WinDLL("user32", use_last_error=True)
@@ -206,21 +208,77 @@ class AlphaStrip(StripRenderer):
         style = self._api.GetWindowLongW(hwnd, self._winsys.GWL_EXSTYLE)
         self._style_before = style
         # Tk marks a borderless window as a "tool window", and OBS leaves tool windows out of its
-        # Window Capture list. Make it an ordinary window; an invisible owner window keeps it
-        # off the taskbar (owned windows get no taskbar button).
+        # Window Capture list. Make it an ordinary window. By default an invisible owner window keeps
+        # it off the taskbar (owned windows get no taskbar button); with "Show in the taskbar" on,
+        # there is no owner and the window is flagged as an app window so it gets a button.
         style = (style | self._winsys.WS_EX_LAYERED) & ~WS_EX_TOOLWINDOW
-        self._owner = self._make_owner()
+        if self.taskbar:
+            style |= WS_EX_APPWINDOW
+        else:
+            style &= ~WS_EX_APPWINDOW
+        self._owner = None if self.taskbar else self._make_owner()
         u = self._ulw
         u.ShowWindow(hwnd, SW_HIDE)
         self._api.SetWindowLongW(hwnd, self._winsys.GWL_EXSTYLE, style)
         if self._owner:
             u.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, self._owner)
         u.SetWindowTextW(hwnd, "LycRomanise Lyrics")
+        self._set_icon(hwnd)
         u.ShowWindow(hwnd, SW_SHOWNA)
         self._hwnd = hwnd
-        log.info("true transparency attached to window %s (exstyle %#x -> %#x, owner %s)",
-                 hwnd, self._style_before & 0xFFFFFFFF, style & 0xFFFFFFFF, self._owner)
+        log.info("true transparency attached to window %s (exstyle %#x -> %#x, owner %s, taskbar button %s)",
+                 hwnd, self._style_before & 0xFFFFFFFF, style & 0xFFFFFFFF, self._owner,
+                 "on" if self.taskbar else "off")
         return True
+
+    def _set_icon(self, hwnd):
+        """Give the window the app's .ico (used for its taskbar button and Alt+Tab)."""
+        try:
+            import config
+            if not os.path.isfile(config.ICON_PATH):
+                return
+            u, ct = self._ulw, self._ct
+            v = ct.c_void_p
+            u.LoadImageW.restype = v
+            u.LoadImageW.argtypes = (v, ct.c_wchar_p, ct.c_uint, ct.c_int, ct.c_int, ct.c_uint)
+            u.SendMessageW.restype = v
+            u.SendMessageW.argtypes = (v, ct.c_uint, v, v)
+            for which, metric in ((1, 11), (0, 49)):           # ICON_BIG / ICON_SMALL; SM_CXICON / SM_CXSMICON
+                size = u.GetSystemMetrics(metric)
+                icon = u.LoadImageW(None, config.ICON_PATH, 1, size, size, 0x10)   # IMAGE_ICON, LR_LOADFROMFILE
+                if icon:
+                    u.SendMessageW(hwnd, 0x0080, which, icon)                      # WM_SETICON
+        except Exception:
+            log.warning("couldn't set the strip's window icon", exc_info=True)
+
+    def set_taskbar(self, on):
+        """Show or hide the strip's taskbar button while running."""
+        on = bool(on)
+        if on == self.taskbar:
+            return
+        self.taskbar = on
+        if self._hwnd is None:
+            return                                       # not attached yet: _attach will use the flag
+        try:
+            u, hwnd = self._ulw, self._hwnd
+            style = self._api.GetWindowLongW(hwnd, self._winsys.GWL_EXSTYLE)
+            u.ShowWindow(hwnd, SW_HIDE)
+            if on:
+                style |= WS_EX_APPWINDOW
+                u.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, None)
+                if self._owner:
+                    u.DestroyWindow(self._owner)
+                self._owner = None
+            else:
+                style &= ~WS_EX_APPWINDOW
+                self._owner = self._make_owner()
+                if self._owner:
+                    u.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, self._owner)
+            self._api.SetWindowLongW(hwnd, self._winsys.GWL_EXSTYLE, style)
+            u.ShowWindow(hwnd, SW_SHOWNA)
+            log.info("taskbar button %s", "on" if on else "off")
+        except Exception:
+            log.exception("couldn't change the taskbar button")
 
     def _make_owner(self):
         h = self._ulw.CreateWindowExW(WS_EX_TOOLWINDOW, "STATIC", "LycRomanise owner", WS_POPUP,

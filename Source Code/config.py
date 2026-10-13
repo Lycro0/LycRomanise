@@ -20,6 +20,8 @@ ICON_PATH = os.path.join(_RES_DIR, "assets", "lyrics-overlay.ico")
 
 # Appearance/behaviour settings live in appearance.json. Edit it by hand, or with the Settings window.
 TITLE_CARD_MARKER = "_title_card_off_v2"   # set once appearance.json was saved by this version
+RESET_MARKER = "_defaults_reset_v1_3_2"    # set once every setting was reset to the defaults (v1.3.2)
+defaults_were_reset = False                # True during the run in which that one-time reset happened
 DEFAULT_APPEARANCE = {
     "karaoke_unsung_rgb": [255, 225, 77],   # #ffe14d yellow — not-yet-sung text
     "karaoke_sung_rgb": [255, 61, 154],     # #ff3d9a pink — already-sung text
@@ -34,10 +36,10 @@ DEFAULT_APPEARANCE = {
     "lyric_offset_ms": 0,                   # +ve = lyrics appear earlier, -ve = later
     "outline_size": 1.5,                    # black text border, px (0 = none)
     "spawn_y_percent": 18,                  # first-launch height of the strip, % down the screen
-    "max_line_chars": 0,                    # split lines longer than this (0 = automatic)
-    "show_title_card": False,               # "Artist - Song" before the first lyric (off by default)
-    "hide_lock_icon": False,                # True: no padlock on the strip; lock/unlock from the tray menu only
-    "true_transparency": True,              # real per-pixel transparency (shows through in OBS); False = old colour-key strip, restart to apply
+    "max_line_chars": 0,                    # split lines longer than this many characters (0 = never: lines stay whole, as timed by the lyrics site)
+    "show_title_card": True,                # "Artist - Song" before the first lyric (on by default)
+    "hide_lock_icon": True,                 # True: no padlock on the strip; lock/unlock from the tray menu only
+    "show_in_taskbar": False,               # True: the strip also has a taskbar button (so OBS and other tools can list it); applies live
 }
 
 
@@ -61,11 +63,21 @@ def load_appearance():
     just falls back to defaults, since cosmetic settings shouldn't be
     able to stop the app from starting.
     """
+    global defaults_were_reset
     data = dict(DEFAULT_APPEARANCE)
     if os.path.exists(APPEARANCE_PATH):
         try:
             with open(APPEARANCE_PATH, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
+            if isinstance(loaded, dict) and not loaded.get(RESET_MARKER):
+                # First start of v1.3.2: everyone's settings go back to the (new) defaults, once.
+                log.info("first start of this version: resetting all settings to the defaults")
+                defaults_were_reset = True
+                try:
+                    save_appearance(data)
+                except OSError as exc:
+                    log.warning("couldn't save the reset settings: %s", exc)
+                return data
             if isinstance(loaded, dict):
                 data.update(loaded)
                 if not loaded.get(TITLE_CARD_MARKER):
@@ -82,6 +94,7 @@ def save_appearance(data):
     forever."""
     clean = {k: data[k] for k in DEFAULT_APPEARANCE if k in data}
     clean[TITLE_CARD_MARKER] = True
+    clean[RESET_MARKER] = True
     with open(APPEARANCE_PATH, "w", encoding="utf-8") as f:
         json.dump(clean, f, indent=2)
 

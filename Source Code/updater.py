@@ -159,10 +159,10 @@ def download(release, progress=None):
 
 def cleanup():
     """Delete what an earlier update left in the temp folder (installer, swap script). The small
-    setup.log stays so a failed update can be diagnosed. Files still in use are skipped."""
+    setup.log / update.log stay so a failed update can be diagnosed. Files still in use are skipped."""
     try:
         for name in os.listdir(UPDATE_DIR):
-            if name != "setup.log":
+            if name not in ("setup.log", "update.log"):
                 path = os.path.join(UPDATE_DIR, name)
                 if os.path.isdir(path):
                     shutil.rmtree(path, ignore_errors=True)
@@ -209,27 +209,86 @@ def _in_program_files(folder):
 
 
 def _installer_args():
-    """Switches for the silent in-app update. The installer must go to the folder this copy runs
-    from and in the same mode (all users / current user) as the existing install. Left to
-    itself a silent install picks per-user, can't write to Program Files and rolls back."""
-    return ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS",
-            "/RELAUNCH=1", "/DIR=" + APP_DIR, "/LOG=" + os.path.join(UPDATE_DIR, "setup.log"),
+    """Switches for the silent install. It must go to the folder this copy runs from and in the same
+    mode (all users / current user) as the existing install, or a silent install picks per-user,
+    can't write to Program Files and rolls back."""
+    args = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS",
+            "/RELAUNCH=1", '/DIR="%s"' % APP_DIR, '/LOG="%s"' % os.path.join(UPDATE_DIR, "setup.log"),
             "/ALLUSERS" if _in_program_files(APP_DIR) else "/CURRENTUSER"]
+    if _had_desktop_shortcut():
+        args.append("/TASKS=desktopicon")          # the uninstall removes it; put it back
+    return args
+
+
+def _had_desktop_shortcut():
+    for base in (os.path.join(os.path.expanduser("~"), "Desktop"),
+                 os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
+                 os.path.join(os.environ.get("OneDrive", ""), "Desktop")):
+        if base and os.path.isfile(os.path.join(base, "LycRomanise.lnk")):
+            return True
+    return False
+
+
+def _update_script(setup_path):
+    """A batch file that does the whole update after the app has quit: close every copy, uninstall
+    the old version, install the new one from the downloaded installer, and start it. Doing it as a
+    clean uninstall + install (instead of installing over a copy that may still be locked) avoids
+    "Rolling back changes". Settings and cache live outside the install folder and are kept."""
+    log_path = os.path.join(UPDATE_DIR, "update.log")
+    return "\r\n".join([
+        "@echo off",
+        "chcp 65001 >nul",
+        'set "LOG=%s"' % log_path,
+        'set "SETUP=%s"' % setup_path,
+        'set "APP=%s"' % APP_DIR,
+        'echo ==== %date% %time% update started >> "%LOG%"',
+        "ping -n 3 127.0.0.1 >nul",
+        'taskkill /F /T /IM LycRomanise.exe >> "%LOG%" 2>&1',
+        "ping -n 2 127.0.0.1 >nul",
+        'if not exist "%APP%\\unins000.exe" goto install',
+        'echo uninstalling the old version >> "%LOG%"',
+        'start "" /wait "%APP%\\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART',
+        'echo uninstaller exit code %errorlevel% >> "%LOG%"',
+        "set /a tries=0",
+        ":waitgone",
+        'if not exist "%APP%\\LycRomanise.exe" goto gone',
+        "set /a tries+=1",
+        "if %tries% geq 60 goto gone",
+        "ping -n 2 127.0.0.1 >nul",
+        "goto waitgone",
+        ":gone",
+        "ping -n 3 127.0.0.1 >nul",
+        ":install",
+        'echo installing the new version >> "%LOG%"',
+        'start "" /wait "%SETUP%" ' + " ".join(_installer_args()),
+        'echo installer exit code %errorlevel% >> "%LOG%"',
+        "ping -n 5 127.0.0.1 >nul",
+        'tasklist /FI "IMAGENAME eq LycRomanise.exe" | find /I "LycRomanise.exe" >nul',
+        "if not errorlevel 1 goto done",
+        'if not exist "%APP%\\LycRomanise.exe" goto done',
+        'echo starting the new version >> "%LOG%"',
+        'explorer.exe "%APP%\\LycRomanise.exe"',
+        ":done",
+        'echo ==== finished >> "%LOG%"',
+        "",
+    ])
 
 
 def _run_installer(path):
-    """Start the installer, asking Windows for administrator rights first when the app lives in
-    Program Files (the UAC prompt appears here). Returns True once it has started."""
-    args = _installer_args()
+    """Write the update script and run it, asking Windows for administrator rights first when the
+    app lives in Program Files (the UAC prompt appears here). Returns True once it has started."""
+    script = os.path.join(UPDATE_DIR, "apply_update.cmd")
+    with open(script, "w", encoding="utf-8", newline="") as f:
+        f.write(_update_script(path))
     if _in_program_files(APP_DIR):
         import ctypes
-        params = " ".join('"%s"' % a if " " in a else a for a in args)
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, params, None, 0)
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", '/c ""%s""' % script, None, 0)
         if rc <= 32:
-            log.warning("installer wasn't started (ShellExecute code %s; UAC refused?)", rc)
+            log.warning("update script wasn't started (ShellExecute code %s; UAC refused?)", rc)
             return False
         return True
-    subprocess.Popen([path] + args, close_fds=True, env=_clean_env(), creationflags=_DETACHED | _NEW_GROUP)
+    subprocess.Popen(["cmd.exe", "/c", script], close_fds=True, env=_clean_env(),
+                     creationflags=_NO_WINDOW | _NEW_GROUP)
     return True
 
 

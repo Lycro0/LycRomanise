@@ -174,6 +174,12 @@ class ConfigEditor:
         self.width_row.pack(fill="x", pady=2)
         self.height_row = SizeRow(dims, "Height (px)", settings["desktop_height"], 80, 500, self._changed)
         self.height_row.pack(fill="x", pady=2)
+
+        self.split_row = SizeRow(dims, "Split lines at", settings["max_line_chars"], 0, 200, self._changed)
+        self.split_row.pack(fill="x", pady=(8, 0))
+        tk.Label(dims, text="characters. 0 = never split: each line stays whole and keeps the lyrics site's "
+                 "timing. A higher number cuts longer lines into pieces; the later pieces' timing is a guess.",
+                 fg=FG_DIM, bg=BG, font=("Segoe UI", 9), justify="left", wraplength=360, anchor="w").pack(fill="x")
         self.offset_row = SizeRow(
             dims, "Lyric offset (ms)", settings["lyric_offset_ms"], -3000, 3000, self._changed
         )
@@ -186,10 +192,10 @@ class ConfigEditor:
         )
         self.title_var = tk.BooleanVar(value=bool(settings["show_title_card"]))
         self.hide_lock_var = tk.BooleanVar(value=bool(settings["hide_lock_icon"]))
-        self.alpha_var = tk.BooleanVar(value=bool(settings["true_transparency"]))
+        self.taskbar_var = tk.BooleanVar(value=bool(settings["show_in_taskbar"]))
         for text, var in (("Show 'Artist - Song' title card first", self.title_var),
                           ("Hide the lock icon (lock and unlock from the tray menu only)", self.hide_lock_var),
-                          ("True transparency (shows through in OBS; restart to apply)", self.alpha_var)):
+                          ("Show a taskbar button for the strip (helps OBS find the window)", self.taskbar_var)):
             tk.Checkbutton(
                 disp, text=text, variable=var, fg=FG, bg=BG, selectcolor=FIELD_BG,
                 activebackground=BG, activeforeground=FG, font=("Segoe UI", 10), anchor="w",
@@ -307,9 +313,10 @@ class ConfigEditor:
             "desktop_width": self.width_row.get(),
             "desktop_height": self.height_row.get(),
             "lyric_offset_ms": self.offset_row.get(),
+            "max_line_chars": self.split_row.get(),
             "show_title_card": bool(self.title_var.get()),
             "hide_lock_icon": bool(self.hide_lock_var.get()),
-            "true_transparency": bool(self.alpha_var.get()),
+            "show_in_taskbar": bool(self.taskbar_var.get()),
             "outline_size": self._outline(),
         }
 
@@ -383,9 +390,10 @@ class ConfigEditor:
         self.width_row.var.set(defaults["desktop_width"])
         self.height_row.var.set(defaults["desktop_height"])
         self.offset_row.var.set(defaults["lyric_offset_ms"])
+        self.split_row.var.set(defaults["max_line_chars"])
         self.title_var.set(defaults["show_title_card"])
         self.hide_lock_var.set(defaults["hide_lock_icon"])
-        self.alpha_var.set(defaults["true_transparency"])
+        self.taskbar_var.set(defaults["show_in_taskbar"])
         self.outline_var.set(defaults["outline_size"])
         self._draw_preview()
         self._save()
