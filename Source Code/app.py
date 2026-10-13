@@ -25,6 +25,7 @@ import layout
 import tray
 import winddiag
 import winsys
+import drawing
 from drawing import (TextMeter, _draw_outline_only, _draw_outlined_text, _ease_out_cubic, _lerp_rgb,
                      _rgb_to_hex)
 from selftest import run_selftest
@@ -33,6 +34,7 @@ from romanize import detect_script, needs_romanization, romanize_line
 from media_client import MediaClient
 import updater
 import update_dialog
+import mobile_server
 from textnorm import normalize
 
 log = logging.getLogger("spoti.app")
@@ -69,8 +71,9 @@ LINE_TICK_MS = 20              # how often the current line is re-checked, indep
 DESKTOP_TICK_MS = 16           # redraw rate for the strip (~60 per second)
 LINE_ANIM_SECONDS = 0.28       # slide transition between lines
 
-TITLE_CARD_MAX_S = 8.0         # the "Artist - Song" card never shows longer than this
-NO_LYRICS_NOTICE_S = 6.0
+TITLE_CARD_MAX_S = 10.0        # the "Artist - Song" card shows for about this long (less if the first lyric starts sooner)
+NO_LYRICS_NOTICE_S = TITLE_CARD_MAX_S
+MOBILE_PUBLISH_S = 0.06        # how often the phone page gets fresh state
 
 # --- desktop strip defaults (config.DEFAULT_APPEARANCE / appearance.json override) ---
 DESKTOP_BG = "#000000"
@@ -88,6 +91,9 @@ SPAWN_Y_PERCENT = 18
 MAX_LINE_CHARS = 0
 SHOW_TITLE_CARD = True
 HIDE_LOCK_ICON = True        # no padlock on the strip; lock and unlock from the tray menu only
+MOBILE_ENABLED = False       # built-in web page for phones/tablets (Settings -> Mobile view)
+MOBILE_PORT = mobile_server.DEFAULT_PORT
+OUTLINE_RGB = (0, 0, 0)      # text border colour; also used by the title card and the next line
 SHOW_IN_TASKBAR = False      # also show a taskbar button for the strip (so OBS can list it); applies live
 
 # Karaoke fill: the current line starts yellow (not-yet-sung) and turns pink
@@ -129,7 +135,7 @@ def _load_appearance():
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
     global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
     global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
-    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR
+    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR, MOBILE_ENABLED, MOBILE_PORT, OUTLINE_RGB
 
     def num(key, cast, default):
         try:
@@ -154,6 +160,13 @@ def _load_appearance():
     SHOW_TITLE_CARD = bool(s.get("show_title_card", True))
     HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", True))
     SHOW_IN_TASKBAR = bool(s.get("show_in_taskbar", False))
+    MOBILE_ENABLED = bool(s.get("mobile_enabled", False))
+    MOBILE_PORT = max(1024, min(65535, num("mobile_port", int, mobile_server.DEFAULT_PORT)))
+    try:
+        OUTLINE_RGB = tuple(int(c) for c in s.get("outline_rgb", OUTLINE_RGB))[:3]
+    except (TypeError, ValueError):
+        pass
+    drawing.set_outline_rgb(OUTLINE_RGB)
 
 _load_appearance()
 
@@ -214,7 +227,9 @@ class LyricsApp:
         self._settings_window = None
         self._appearance_mtime = self._appearance_stamp()
         self.tray = None
-        self._tray_state = (False, False)
+        self._tray_state = (False, False, False)
+        self._mobile = mobile_server.MobileServer(APP_NAME)
+        self._mobile_next_publish = 0.0
         self.player = None
         self._polling = False
         self._poll_busy = False
@@ -229,6 +244,7 @@ class LyricsApp:
         self.root.after(RESULT_DRAIN_MS, self._drain_results)
         self.root.after(LINE_TICK_MS, self._line_tick)
 
+        self._apply_mobile()
         self._connect_player()
         self._update_release = None
         self._update_win = None
@@ -368,6 +384,7 @@ class LyricsApp:
         _load_appearance()
         if SHOW_IN_TASKBAR != old_taskbar and self._alpha is not None:
             self._alpha.set_taskbar(SHOW_IN_TASKBAR)
+        self._apply_mobile(announce=True)
         self._refresh_tray()
         self.desktop_curr_size = DESKTOP_CURR_SIZE
         self.desktop_next_size = DESKTOP_NEXT_SIZE
@@ -524,6 +541,7 @@ class LyricsApp:
     def _quit(self):
         self._save_window_state()
         log.info("quitting")
+        self._mobile.stop()
         if self.tray is not None:
             self.tray.stop()
             self.tray = None
@@ -550,6 +568,8 @@ class LyricsApp:
                 "toggle_lock": self._toggle_lock,
                 "settings": self.open_settings,
                 "toggle_autostart": self._toggle_autostart,
+                "toggle_mobile": self._toggle_mobile,
+                "mobile_info": self._show_mobile_info,
                 "about": lambda: winsys.open_url(RELEASES_URL),
                 "check_update": self.check_for_update,
                 "open_logs": self._open_logs_folder,
@@ -564,10 +584,10 @@ class LyricsApp:
         return self.tray is not None
 
     def _snapshot_tray_state(self):
-        """(locked, autostart) as plain values. The tray runs on its own
+        """(locked, autostart, mobile) as plain values. The tray runs on its own
         thread and must never touch Tk variables or the registry itself, so it reads
         this snapshot, which is only ever rebuilt here on the Tk thread."""
-        self._tray_state = (bool(self.desktop_locked), bool(winsys.autostart_enabled()))
+        self._tray_state = (bool(self.desktop_locked), bool(winsys.autostart_enabled()), bool(MOBILE_ENABLED))
         return self._tray_state
 
     def _refresh_tray(self):
@@ -580,6 +600,58 @@ class LyricsApp:
         if not winsys.set_autostart(want):
             self._set_notice("Couldn't change 'Start with Windows' - see the log", "error", seconds=8)
         self._refresh_tray()
+
+    # ------------------------------------------------------------ mobile view --
+
+    def _apply_mobile(self, announce=False):
+        """Start / stop / move the phone web page so it matches the settings."""
+        try:
+            if not MOBILE_ENABLED:
+                self._mobile.stop()
+                return
+            if self._mobile.running and self._mobile.port == MOBILE_PORT:
+                return
+            if self._mobile.start(MOBILE_PORT):
+                if announce:
+                    self._set_banner("Mobile view: " + mobile_server.mobile_url(MOBILE_PORT), 8.0)
+            else:
+                self._set_notice("Mobile view couldn't start (%s) - try another port in Settings"
+                                 % (self._mobile.error or "see the log"), "error", seconds=10)
+        except Exception:
+            log.exception("couldn't apply the mobile view setting")
+
+    def _toggle_mobile(self):
+        config.update_appearance(mobile_enabled=not MOBILE_ENABLED)
+        self.reload_appearance()
+
+    def _show_mobile_info(self):
+        try:
+            import mobile_dialog
+            mobile_dialog.show(self.root, MOBILE_PORT, MOBILE_ENABLED)
+        except Exception:
+            log.exception("couldn't open the mobile address window")
+
+    def _mobile_state(self):
+        """What the phone page should show right now (same scene as the strip)."""
+        base = {"sung": _rgb_to_hex(KARAOKE_SUNG_RGB), "unsung": _rgb_to_hex(KARAOKE_UNSUNG_RGB),
+                "next_c": _rgb_to_hex(DESKTOP_NEXT_RGB), "outline": _rgb_to_hex(drawing.OUTLINE_RGB),
+                "outline_px": OUTLINE_SIZE}
+        scene = self._scene()
+        playing = bool(self._is_playing and self.current_track_id is not None)
+        if scene is None:
+            base.update(kind="none", playing=playing)
+            return base
+        kind, top, nxt = scene
+        fraction, rate = 1.0, 0.0
+        if kind == "lyric":
+            fraction = self._current_fill_fraction()
+            if playing and 0 <= self.current_index < len(self.segments):
+                seg = self.segments[self.current_index]
+                ahead = layout.seg_fraction(seg, self.line_infos[seg.line], self._estimate_position_s() + 0.25)
+                rate = max(0.0, (ahead - fraction) / 0.25)
+        base.update(kind=kind, top=top, next=nxt, fraction=fraction, rate=rate, playing=playing,
+                    id="%s|%s|%s" % (self.current_track_id, kind, self.current_index))
+        return base
 
     def check_for_update(self, manual=True):
         """Ask GitHub for the latest release (background thread). Automatic on startup;
@@ -1220,9 +1292,9 @@ class LyricsApp:
                 seg = self.segments[idx]
                 nxt = self.segments[idx + 1].text if idx + 1 < len(self.segments) else ""
                 return "lyric", seg.text, nxt
-            # Before the first line: the title card, with the first line as a preview.
+            # Before the first line: the title card on its own (about 10 s, no lyric under it).
             if SHOW_TITLE_CARD and self.title_text and pos < TITLE_CARD_MAX_S:
-                return "title", self.title_text, self.segments[0].text
+                return "title", self.title_text, ""
             return None
 
         if SHOW_TITLE_CARD and self.title_text:
@@ -1245,6 +1317,11 @@ class LyricsApp:
         try:
             self._update_lock_icon_visibility()
             self._redraw_desktop_canvas()
+            if self._mobile.running:
+                now_p = time.perf_counter()
+                if now_p >= self._mobile_next_publish:
+                    self._mobile_next_publish = now_p + MOBILE_PUBLISH_S
+                    self._mobile.publish(self._mobile_state())
             # Full Windows repaint only when what's shown changed (or every
             # REDRAW_KEEPALIVE_S): invalidating with erase every 40 ms flickers.
             sig = (self._scene(), bool(self.desktop_locked), (self._active_notice() or {}).get("text"),

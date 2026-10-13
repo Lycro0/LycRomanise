@@ -62,7 +62,7 @@ def load_icon_image(path=None, size=64):
     return make_icon_image(size)
 
 
-def menu_spec(is_locked, autostart_on, can_autostart=True):
+def menu_spec(is_locked, autostart_on, mobile_on=False, can_autostart=True):
     """Pure description of the tray menu: [(label, action_name, checked)] with
     None as a separator. Kept separate from pystray so it can be tested."""
     from version import __version__
@@ -74,13 +74,15 @@ def menu_spec(is_locked, autostart_on, can_autostart=True):
     spec.append(("Settings…", "settings", None))
     if can_autostart:
         spec.append(("Start with Windows", "toggle_autostart", bool(autostart_on)))
+    spec += [None, ("Mobile view (phones / tablets)", "toggle_mobile", bool(mobile_on)),
+             ("Show mobile address / QR…", "mobile_info", None)]
     spec += [None, ("Check for updates", "check_update", None), ("Open logs folder", "open_logs", None), ("Quit", "quit", None)]
     return spec
 
 
 class TrayIcon:
     """`actions` maps action names from menu_spec to zero-arg callables (run on
-    the Tk thread via `post`); `state` returns (locked, autostart)."""
+    the Tk thread via `post`); `state` returns (locked, autostart, mobile)."""
 
     def __init__(self, actions, state, post, can_autostart=True, title=None):
         self._actions, self._state, self._post = actions, state, post
@@ -103,8 +105,8 @@ class TrayIcon:
         return pystray.Menu(*items)
 
     def _is_checked(self, action):
-        _locked, autostart = self._state()
-        return {"toggle_autostart": autostart}.get(action, False)
+        _locked, autostart, mobile = self._state()
+        return {"toggle_autostart": autostart, "toggle_mobile": mobile}.get(action, False)
 
     def _make_handler(self, action):
         def handler(_icon=None, _item=None):

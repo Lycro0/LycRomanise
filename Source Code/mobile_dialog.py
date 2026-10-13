@@ -1,0 +1,77 @@
+"""Small window that shows the address of the mobile view (and a QR code to scan with the phone)."""
+
+import logging
+import tkinter as tk
+
+import mobile_server
+
+log = logging.getLogger("spoti.mobile")
+
+BG, FG, FG_DIM, ACCENT, FIELD_BG = "#0d0d0d", "#e8e8e8", "#9a9a9a", "#1db954", "#1a1a1a"
+
+
+def _qr_photo(url, box=6):
+    """A tk PhotoImage of the QR code for `url`, or None when the optional 'qrcode' package is missing."""
+    try:
+        import qrcode
+    except Exception:
+        return None
+    try:
+        qr = qrcode.QRCode(border=2, box_size=box)
+        qr.add_data(url)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        size = len(matrix)
+        rows = []
+        for row in matrix:
+            line = "".join(("#000000 " if cell else "#ffffff ") * box for cell in row)
+            rows.extend(["{" + line.strip() + "}"] * box)
+        img = tk.PhotoImage(width=size * box, height=size * box)
+        img.put(" ".join(rows))
+        return img
+    except Exception:
+        log.warning("couldn't draw the QR code", exc_info=True)
+        return None
+
+
+def show(parent, port, enabled=True):
+    """Open the 'Mobile view' window. `parent` is any Tk widget."""
+    url = mobile_server.mobile_url(port)
+    win = tk.Toplevel(parent)
+    win.title("LycRomanise - Mobile view")
+    win.configure(bg=BG)
+    win.attributes("-topmost", True)
+    tk.Label(win, text="Lyrics on your phone or tablet", fg=FG, bg=BG,
+             font=("Segoe UI", 12, "bold")).pack(padx=20, pady=(16, 4))
+    steps = ("1. Put the phone on the same Wi-Fi as this PC.\n"
+             "2. Open this address in Safari / Chrome (or scan the code).\n"
+             "3. Tap the page once for full screen.")
+    tk.Label(win, text=steps, fg=FG_DIM, bg=BG, font=("Segoe UI", 10), justify="left").pack(padx=20, pady=(0, 8))
+    if not enabled:
+        tk.Label(win, text="Mobile view is currently OFF - turn it on in Settings or the tray menu.",
+                 fg="#ff8a8a", bg=BG, font=("Segoe UI", 10, "bold"), wraplength=320).pack(padx=20, pady=(0, 8))
+    field = tk.Entry(win, font=("Consolas", 12), justify="center", bg=FIELD_BG, fg=FG, relief="flat",
+                     insertbackground=FG, readonlybackground=FIELD_BG)
+    field.insert(0, url)
+    field.configure(state="readonly")
+    field.pack(fill="x", padx=20, ipady=6)
+    photo = _qr_photo(url)
+    if photo is not None:
+        lbl = tk.Label(win, image=photo, bg="#ffffff", bd=6, relief="flat")
+        lbl.image = photo
+        lbl.pack(pady=12)
+    else:
+        tk.Label(win, text="(Install the optional 'qrcode' package to get a scannable code here.)",
+                 fg=FG_DIM, bg=BG, font=("Segoe UI", 9), wraplength=320).pack(pady=8)
+
+    def copy():
+        win.clipboard_clear()
+        win.clipboard_append(url)
+
+    row = tk.Frame(win, bg=BG)
+    row.pack(pady=(0, 16))
+    tk.Button(row, text="Copy address", command=copy, bg=FIELD_BG, fg=FG, relief="flat", padx=12, pady=5,
+              font=("Segoe UI", 10)).pack(side="left", padx=4)
+    tk.Button(row, text="Close", command=win.destroy, bg=ACCENT, fg="#0d0d0d", relief="flat", padx=14, pady=5,
+              font=("Segoe UI", 10, "bold")).pack(side="left", padx=4)
+    return win

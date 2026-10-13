@@ -120,11 +120,13 @@ class StripRenderer:
         just laid on the frame, so it costs one paste per frame instead of dozens of draws."""
         if not text or size <= 0:
             return
+        import drawing
         from drawing import _outline_offsets
         key, pf = self._pil_font(font)
         p, left, top, ls = self._origin(x, y, text, font, anchor, pf)
         pad = int(math.ceil(size)) + 2
-        tkey = (key, text, round(size, 2))
+        orgb = tuple(drawing.OUTLINE_RGB)
+        tkey = (key, text, round(size, 2), orgb)
         tile = self._tiles.get(tkey)
         if tile is None:
             if len(self._tiles) >= TILE_LIMIT:
@@ -134,7 +136,7 @@ class StripRenderer:
             for dx, dy in _outline_offsets(round(size, 2)):
                 for i, ch in enumerate(text):
                     if ch != " ":
-                        d.text((pad + p[i] + dx, pad + dy), ch, font=pf, fill=OUTLINE_RGBA, anchor="la")
+                        d.text((pad + p[i] + dx, pad + dy), ch, font=pf, fill=orgb + (255,), anchor="la")
             self._tiles[tkey] = tile
         self._over(tile, int(round(left)) - pad, int(round(top)) - pad)
 

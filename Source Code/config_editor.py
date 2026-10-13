@@ -1,8 +1,8 @@
 """LycRomanise — appearance settings editor.
 
 A small standalone GUI for changing how the Desktop Lyrics strip looks:
-the karaoke colors, the dim "next line" color, font sizes, and the strip's
-size — without touching JSON by hand.
+the karaoke colors, the text outline colour, the "next line" color, font sizes, the strip's
+size, and the optional mobile view — without touching JSON by hand.
 
 Normally opened from the tray icon
 ("Settings…"). It can also run on its own: python config_editor.py
@@ -146,6 +146,10 @@ class ConfigEditor:
         self.sung_row.pack(fill="x", pady=2)
         self.next_row = ColorRow(colors, "Next line", settings["next_line_rgb"], self._changed)
         self.next_row.pack(fill="x", pady=2)
+        self.outline_row = ColorRow(colors, "Text outline", settings["outline_rgb"], self._changed)
+        self.outline_row.pack(fill="x", pady=2)
+        tk.Label(colors, text="The title card uses the 'Already sung' colour and the text outline colour.",
+                 fg=FG_DIM, bg=BG, font=("Segoe UI", 9), anchor="w").pack(fill="x", pady=(4, 0))
 
         sizes = tk.Frame(body, bg=BG)
         sizes.pack(fill="x", padx=16, pady=(0, 12))
@@ -193,7 +197,7 @@ class ConfigEditor:
         self.title_var = tk.BooleanVar(value=bool(settings["show_title_card"]))
         self.hide_lock_var = tk.BooleanVar(value=bool(settings["hide_lock_icon"]))
         self.taskbar_var = tk.BooleanVar(value=bool(settings["show_in_taskbar"]))
-        for text, var in (("Show 'Artist - Song' title card first", self.title_var),
+        for text, var in (("Show 'Artist - Song' title card first (about 10 seconds)", self.title_var),
                           ("Hide the lock icon (lock and unlock from the tray menu only)", self.hide_lock_var),
                           ("Show a taskbar button for the strip (helps OBS find the window)", self.taskbar_var)):
             tk.Checkbutton(
@@ -221,6 +225,26 @@ class ConfigEditor:
         else:
             self.autostart_var = None
 
+        mob = tk.Frame(body, bg=BG)
+        mob.pack(fill="x", padx=16, pady=(0, 12))
+        tk.Label(mob, text="Mobile view", fg=ACCENT, bg=BG, font=("Segoe UI", 10, "bold")).pack(
+            anchor="w", pady=(0, 6)
+        )
+        self.mobile_var = tk.BooleanVar(value=bool(settings["mobile_enabled"]))
+        tk.Checkbutton(
+            mob, text="Show the lyrics on phones and tablets (same Wi-Fi)", variable=self.mobile_var,
+            fg=FG, bg=BG, selectcolor=FIELD_BG, activebackground=BG, activeforeground=FG,
+            font=("Segoe UI", 10), anchor="w", command=self._changed,
+        ).pack(fill="x")
+        self.port_row = SizeRow(mob, "Port", settings["mobile_port"], 1024, 65535, self._changed)
+        self.port_row.pack(fill="x", pady=2)
+        tk.Label(mob, text="When on, open the address below on your phone (Safari / Chrome). Windows may ask "
+                 "to allow LycRomanise through the firewall: allow it on Private networks.",
+                 fg=FG_DIM, bg=BG, font=("Segoe UI", 9), justify="left", wraplength=360, anchor="w").pack(fill="x")
+        tk.Button(mob, text="Show address / QR code…", command=self._show_mobile, bg=FIELD_BG, fg=FG,
+                  activebackground=FIELD_BG, font=("Segoe UI", 10), relief="flat", padx=10, pady=4,
+                  cursor="hand2").pack(anchor="w", pady=(6, 0))
+
         preview = tk.Frame(body, bg=BG)
         preview.pack(fill="x", padx=16, pady=(0, 12))
         tk.Label(preview, text="Preview", fg=ACCENT, bg=BG, font=("Segoe UI", 10, "bold")).pack(
@@ -232,7 +256,7 @@ class ConfigEditor:
         )
         self.preview_canvas.pack(fill="x")
         self._draw_preview()
-        for row in (self.unsung_row, self.sung_row, self.next_row):
+        for row in (self.unsung_row, self.sung_row, self.next_row, self.outline_row):
             row.swatch.bind("<Button-1>", lambda _e: self._draw_preview(), add="+")
 
         self._built = True
@@ -296,8 +320,11 @@ class ConfigEditor:
         x = 10
         unsung_hex = "#%02x%02x%02x" % tuple(self.unsung_row.rgb)
         sung_hex = "#%02x%02x%02x" % tuple(self.sung_row.rgb)
+        outline_hex = "#%02x%02x%02x" % tuple(self.outline_row.rgb)
         for i, ch in enumerate(half):
             color = sung_hex if i < mid else unsung_hex
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+                c.create_text(x + dx, 22 + dy, text=ch, fill=outline_hex, anchor="w", font=("Segoe UI", 13, "bold"))
             c.create_text(x, 22, text=ch, fill=color, anchor="w", font=("Segoe UI", 13, "bold"))
             x += 9
 
@@ -318,7 +345,16 @@ class ConfigEditor:
             "hide_lock_icon": bool(self.hide_lock_var.get()),
             "show_in_taskbar": bool(self.taskbar_var.get()),
             "outline_size": self._outline(),
+            "outline_rgb": self.outline_row.rgb,
+            "mobile_enabled": bool(self.mobile_var.get()),
+            "mobile_port": self.port_row.get(),
         }
+
+    def _show_mobile(self):
+        import mobile_dialog
+        if self._apply_job is not None:       # make sure the latest port is saved/applied first
+            self._save()
+        mobile_dialog.show(self.root, self.port_row.get(), bool(self.mobile_var.get()))
 
     def _outline(self):
         try:
@@ -380,7 +416,8 @@ class ConfigEditor:
         self.unsung_row.rgb = list(defaults["karaoke_unsung_rgb"])
         self.sung_row.rgb = list(defaults["karaoke_sung_rgb"])
         self.next_row.rgb = list(defaults["next_line_rgb"])
-        for row in (self.unsung_row, self.sung_row, self.next_row):
+        self.outline_row.rgb = list(defaults["outline_rgb"])
+        for row in (self.unsung_row, self.sung_row, self.next_row, self.outline_row):
             row.swatch.configure(bg=row._hex())
             row.hex_label.configure(text=row._hex())
         self.curr_size_row.var.set(defaults["curr_font_size"])
@@ -395,6 +432,8 @@ class ConfigEditor:
         self.hide_lock_var.set(defaults["hide_lock_icon"])
         self.taskbar_var.set(defaults["show_in_taskbar"])
         self.outline_var.set(defaults["outline_size"])
+        self.mobile_var.set(defaults["mobile_enabled"])
+        self.port_row.var.set(defaults["mobile_port"])
         self._draw_preview()
         self._save()
 

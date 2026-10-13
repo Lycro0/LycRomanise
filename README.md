@@ -1,4 +1,4 @@
-# LycRomanise v1.3.2
+# LycRomanise v1.4.0
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -44,13 +44,23 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
   (`show_in_taskbar`, applies live). If the strip ever fails to draw with true transparency (or Pillow / Segoe UI
   is missing), the app logs it and falls back to the old colour-key strip, which OBS shows with a black
   background (add a Color Key filter set to black).
-- **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Check for updates, Open logs
+- **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Mobile view, Show mobile address / QR, Check for updates, Open logs
   folder, Quit. By default there is no taskbar button (see "Show a taskbar button" in Settings) and no right-click menu.
 - **Settings…** (from the tray) changes karaoke colors, next-line color, font sizes, strip width and
-  height, lyric offset, outline, the title card, hiding the lock icon, the taskbar button and Start with Windows. Changes apply live and are saved
+  height, lyric offset, outline size and colour, the title card, the mobile view, hiding the lock icon, the taskbar button and Start with Windows. Changes apply live and are saved
   to `appearance.json`. "Reset to defaults" restores the built-in look.
 - **Lyric offset** shifts all lyrics in 100 ms steps (`lyric_offset_ms`).
-- **Title card** (off by default): turn on `show_title_card` to show "Artist - Song" before the first line.
+- **Title card** (`show_title_card`, on by default): "Artist - Song" shows for about 10 seconds when a song starts (it ends
+  sooner if the first lyric begins before that). Only the artist and title are shown, no lyric under it. It is drawn in the
+  "Already sung" colour with the text outline colour you pick.
+- **Text outline:** Settings has an "Outline" size and a "Text outline" colour (`outline_size`, `outline_rgb`). The colour
+  is used for every line on the strip, the title card included.
+- **Mobile view** (off by default, `mobile_enabled`): tick "Show the lyrics on phones and tablets" in Settings (or use the tray
+  menu). LycRomanise then serves a small web page on your network: open `http://<this PC's address>:8765` in Safari or Chrome on
+  a phone/tablet on the same Wi-Fi (or scan the QR code from "Show address / QR code…"). The page shows the same karaoke line,
+  next line and title card with your colours and outline. Tap it once for full screen. The port can be changed (`mobile_port`).
+  Windows may ask to allow LycRomanise through the firewall the first time: allow it on Private networks. Nothing is sent
+  outside your network, and only the lyric text currently on the strip is served.
 - **Start with Windows** adds a per-user startup entry (no admin rights needed).
 
 The karaoke fill is an estimate. LRCLIB gives a timestamp for the start of each line, not for each

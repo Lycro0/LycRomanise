@@ -34,11 +34,14 @@ DEFAULT_APPEARANCE = {
     "desktop_width": 720,
     "desktop_height": 150,
     "lyric_offset_ms": 0,                   # +ve = lyrics appear earlier, -ve = later
-    "outline_size": 1.5,                    # black text border, px (0 = none)
+    "outline_size": 1.5,                    # text border, px (0 = none)
+    "outline_rgb": [0, 0, 0],               # text border colour (also used for the title card and next line)
     "spawn_y_percent": 18,                  # first-launch height of the strip, % down the screen
     "max_line_chars": 0,                    # split lines longer than this many characters (0 = never: lines stay whole, as timed by the lyrics site)
-    "show_title_card": True,                # "Artist - Song" before the first lyric (on by default)
+    "show_title_card": True,                # "Artist - Song" card (about 10 s, or until the first lyric starts)
     "hide_lock_icon": True,                 # True: no padlock on the strip; lock/unlock from the tray menu only
+    "mobile_enabled": False,                # True: also show the lyrics on phones/tablets on the same Wi-Fi (built-in web page)
+    "mobile_port": 8765,                    # port of that web page
     "show_in_taskbar": False,               # True: the strip also has a taskbar button (so OBS and other tools can list it); applies live
 }
 

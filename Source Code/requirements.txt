@@ -3,6 +3,7 @@ pypinyin>=0.51.0
 pykakasi>=2.2.1
 pystray>=0.19.5
 pillow>=10.0.0
+qrcode>=7.4          # optional: draws the QR code in the mobile-view window
 winrt-runtime>=2.0.0; sys_platform == "win32"
 winrt-Windows.Media.Control>=2.0.0; sys_platform == "win32"
 winrt-Windows.Foundation>=2.0.0; sys_platform == "win32"

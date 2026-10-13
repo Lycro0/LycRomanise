@@ -1,5 +1,5 @@
 """Small pure drawing helpers for the lyrics strip (colour maths, outlined text, text widths).
-No app state and no runtime-changing settings live here, so it is safe to import anywhere."""
+The only runtime setting is the outline colour (set_outline_rgb), so it is safe to import anywhere."""
 import math
 from functools import lru_cache
 
@@ -20,6 +20,19 @@ def _ease_out_cubic(t):
 # strip keys off, so a literal (0, 0, 0) outline would vanish like the
 # background does.
 OUTLINE_RGB = (1, 1, 1)
+
+def set_outline_rgb(rgb):
+    """Use `rgb` as the text border colour (Settings -> Outline colour). Pure black is nudged to
+    (1, 1, 1) for the reason above. Returns the colour actually used."""
+    global OUTLINE_RGB
+    try:
+        r, g, b = (max(0, min(255, int(c))) for c in rgb)
+    except (TypeError, ValueError):
+        r, g, b = 1, 1, 1
+    if (r, g, b) == (0, 0, 0):
+        r, g, b = 1, 1, 1
+    OUTLINE_RGB = (r, g, b)
+    return OUTLINE_RGB
 
 @lru_cache(maxsize=16)
 def _outline_offsets(size):
