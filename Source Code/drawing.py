@@ -33,6 +33,10 @@ def _outline_offsets(size):
     )
 
 def _draw_outline_only(canvas, x, y, text, font, size, anchor="nw", justify="left"):
+    hook = getattr(canvas, "draw_outline", None)    # the true-transparency renderer draws borders itself
+    if hook is not None:
+        hook(x, y, text, font, size, anchor, justify)
+        return
     outline_hex = _rgb_to_hex(OUTLINE_RGB)
     for dx, dy in _outline_offsets(round(size, 2)):
         canvas.create_text(

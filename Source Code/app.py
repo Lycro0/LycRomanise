@@ -6,6 +6,7 @@ Run: double-click LyricsOverlay.pyw (or LyricsOverlay.bat) - no console window.
 Quit from the tray icon.
 """
 
+import alpha_window
 import applog
 
 applog.setup()   # first thing: file logging + crash capture (nothing goes to a console)
@@ -64,8 +65,8 @@ RESULT_DRAIN_MS = 20          # how often the UI thread picks up finished backgr
 # enough to be a real seek, in which case it snaps.
 POLL_CORRECTION_GAIN = 0.35
 POLL_SEEK_THRESHOLD_S = 1.0
-LINE_TICK_MS = 30              # how often the current line is re-checked, independent of polling
-DESKTOP_TICK_MS = 20           # redraw rate for the strip
+LINE_TICK_MS = 20              # how often the current line is re-checked, independent of polling
+DESKTOP_TICK_MS = 16           # redraw rate for the strip (~60 per second)
 LINE_ANIM_SECONDS = 0.28       # slide transition between lines
 
 TITLE_CARD_MAX_S = 8.0         # the "Artist - Song" card never shows longer than this
@@ -87,6 +88,7 @@ SPAWN_Y_PERCENT = 18
 MAX_LINE_CHARS = 0
 SHOW_TITLE_CARD = False
 HIDE_LOCK_ICON = False       # no padlock on the strip; lock and unlock from the tray menu only
+TRUE_TRANSPARENCY = True     # real per-pixel alpha instead of a colour key (alpha_window.py); needs a restart
 
 # Karaoke fill: the current line starts yellow (not-yet-sung) and turns pink
 # left to right as playback reaches it, blended across a band scaled to the
@@ -126,7 +128,7 @@ def _load_appearance():
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
     global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
     global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
-    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON
+    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, TRUE_TRANSPARENCY
 
     def num(key, cast, default):
         try:
@@ -150,6 +152,7 @@ def _load_appearance():
     MAX_LINE_CHARS = max(0, num("max_line_chars", int, 0))
     SHOW_TITLE_CARD = bool(s.get("show_title_card", False))
     HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", False))
+    TRUE_TRANSPARENCY = bool(s.get("true_transparency", True))
 
 _load_appearance()
 
@@ -190,6 +193,7 @@ class LyricsApp:
         self.lock_icon_label = None
         self._lock_icon_visible = None
         self.desktop_canvas = None
+        self._alpha = None             # alpha_window.AlphaStrip when "true transparency" is on
         self._anim_start_perf = None
 
         # --- playback timing (interpolated between polls)
@@ -220,6 +224,7 @@ class LyricsApp:
         self._build_desktop_ui(restore_lock=True)
         self.root.after(UI_CALL_DRAIN_MS, self._drain_ui_calls)
         self.root.after(APPEARANCE_WATCH_MS, self._watch_appearance)
+        self.root.after(60000, updater.cleanup)       # leftovers of an earlier update
         self.root.after(RESULT_DRAIN_MS, self._drain_results)
         self.root.after(LINE_TICK_MS, self._line_tick)
 
@@ -358,7 +363,10 @@ class LyricsApp:
         font sizes, strip size, outline, offset and title card, with
         no restart."""
         old_bg, old_w, old_h = DESKTOP_BG, DESKTOP_WIDTH, DESKTOP_HEIGHT
+        old_alpha = TRUE_TRANSPARENCY
         _load_appearance()
+        if TRUE_TRANSPARENCY != old_alpha:
+            self._set_notice("Restart LycRomanise to apply the transparency change", "info", seconds=8)
         self._refresh_tray()
         self.desktop_curr_size = DESKTOP_CURR_SIZE
         self.desktop_next_size = DESKTOP_NEXT_SIZE
@@ -446,6 +454,16 @@ class LyricsApp:
         self._desktop_next_font = tkfont.Font(family="Segoe UI", size=self.desktop_next_size)
         self._measure_font = tkfont.Font(family="Segoe UI", size=self.desktop_curr_size, weight="bold")
 
+        self._alpha = None
+        if TRUE_TRANSPARENCY and sys.platform.startswith("win"):
+            if alpha_window.available():
+                try:
+                    self._alpha = alpha_window.AlphaStrip(self.root, self._meter)
+                    log.info("true transparency is on")
+                except Exception:
+                    log.exception("true transparency couldn't start; using the normal strip")
+            else:
+                log.warning("true transparency needs Pillow and the Segoe UI fonts; using the normal strip")
         self._enable_transparency()
         self._build_lock_icon()
         self.desktop_locked = bool(was_locked and restore_lock)
@@ -508,6 +526,17 @@ class LyricsApp:
             self.tray.stop()
             self.tray = None
         self.root.destroy()
+
+    def _quit_for_update(self):
+        """Quit and make sure the process is really gone: a running LycRomanise.exe can't be
+        replaced, so an update that leaves it half-alive fails and the installer rolls back."""
+        try:
+            self._quit()
+        except Exception:
+            log.exception("error while quitting for the update")
+        finally:
+            logging.shutdown()
+            os._exit(0)
 
     # ------------------------------------------- tray / settings / autostart --
 
@@ -646,7 +675,7 @@ class LyricsApp:
     def _finish_update(self, path, kind, dlg):
         _safe(dlg.installing)
         if updater.apply(path, kind):
-            self.root.after(900, self._quit)      # the installer / swap script takes over from here
+            self.root.after(500, self._quit_for_update)      # the installer / swap script takes over from here
         else:
             _safe(dlg.failed, "Couldn't start the installer. The file is in %s" % updater.UPDATE_DIR)
 
@@ -816,7 +845,8 @@ class LyricsApp:
         """Ask Windows for a repaint (no erase). -transparentcolor is a hard
         chroma key, not real alpha, so the compositor can otherwise leave
         stale glyph pixels behind when text changes or disappears."""
-        if not sys.platform.startswith("win") or winsys.env_flag("SPOTI_DEBUG_NO_INVALIDATE"):
+        if not sys.platform.startswith("win") or winsys.env_flag("SPOTI_DEBUG_NO_INVALIDATE") \
+                or self._alpha is not None:          # the alpha strip is pushed whole every frame
             return
         try:
             winsys.invalidate(self.root.winfo_id())
@@ -837,7 +867,7 @@ class LyricsApp:
     def _enable_transparency(self):
         """See-through background is a Windows-only tkinter trick; elsewhere
         this is a no-op and the strip just has a solid dark background."""
-        if sys.platform.startswith("win"):
+        if sys.platform.startswith("win") and self._alpha is None:
             try:
                 self.root.attributes("-transparentcolor", DESKTOP_BG)
             except tk.TclError:
@@ -1345,9 +1375,25 @@ class LyricsApp:
         return layout.seg_fraction(seg, self.line_infos[seg.line], self._estimate_position_s())
 
     def _redraw_desktop_canvas(self):
-        canvas = self.desktop_canvas
-        if canvas is None:
+        if self.desktop_canvas is None:
             return
+        if self._alpha is None:
+            self._paint_scene(self.desktop_canvas)
+            return
+        # True transparency: the same drawing code paints into an image that is handed to Windows.
+        self._alpha.begin(self.strip_w, self.strip_h, hit_testable=not self.desktop_locked)
+        try:
+            self._paint_scene(self._alpha)
+            self._alpha.commit()
+        except Exception:
+            log.exception("true transparency draw failed")
+            self._alpha.failed = True
+        if self._alpha.failed:
+            self._alpha.detach()
+            self._alpha = None
+            self._enable_transparency()                  # the colour-key strip takes over again
+
+    def _paint_scene(self, canvas):
         canvas.delete("all")
 
         if self._show_border:

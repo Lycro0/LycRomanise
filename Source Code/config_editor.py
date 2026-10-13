@@ -186,8 +186,10 @@ class ConfigEditor:
         )
         self.title_var = tk.BooleanVar(value=bool(settings["show_title_card"]))
         self.hide_lock_var = tk.BooleanVar(value=bool(settings["hide_lock_icon"]))
+        self.alpha_var = tk.BooleanVar(value=bool(settings["true_transparency"]))
         for text, var in (("Show 'Artist - Song' title card first", self.title_var),
-                          ("Hide the lock icon (lock and unlock from the tray menu only)", self.hide_lock_var)):
+                          ("Hide the lock icon (lock and unlock from the tray menu only)", self.hide_lock_var),
+                          ("True transparency (shows through in OBS; restart to apply)", self.alpha_var)):
             tk.Checkbutton(
                 disp, text=text, variable=var, fg=FG, bg=BG, selectcolor=FIELD_BG,
                 activebackground=BG, activeforeground=FG, font=("Segoe UI", 10), anchor="w",
@@ -307,6 +309,7 @@ class ConfigEditor:
             "lyric_offset_ms": self.offset_row.get(),
             "show_title_card": bool(self.title_var.get()),
             "hide_lock_icon": bool(self.hide_lock_var.get()),
+            "true_transparency": bool(self.alpha_var.get()),
             "outline_size": self._outline(),
         }
 
@@ -382,6 +385,7 @@ class ConfigEditor:
         self.offset_row.var.set(defaults["lyric_offset_ms"])
         self.title_var.set(defaults["show_title_card"])
         self.hide_lock_var.set(defaults["hide_lock_icon"])
+        self.alpha_var.set(defaults["true_transparency"])
         self.outline_var.set(defaults["outline_size"])
         self._draw_preview()
         self._save()

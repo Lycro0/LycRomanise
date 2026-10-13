@@ -10,8 +10,10 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 
 import requests
@@ -24,7 +26,7 @@ API_URL = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
 
 EXE_NAME = "LycRomanise.exe"
 SETUP_NAME = "LycRomanise_Setup.exe"
-UPDATE_DIR = os.path.join(DATA_DIR, "update")
+UPDATE_DIR = os.path.join(tempfile.gettempdir(), "LycRomanise_update")   # temp: nothing lingers in the app data
 SKIP_PATH = os.path.join(DATA_DIR, "skipped_update.txt")
 _ALLOWED_HOSTS = ("github.com", "githubusercontent.com")
 
@@ -155,6 +157,21 @@ def download(release, progress=None):
     return dest, install_kind()
 
 
+def cleanup():
+    """Delete what an earlier update left in the temp folder (installer, swap script). The small
+    setup.log stays so a failed update can be diagnosed. Files still in use are skipped."""
+    try:
+        for name in os.listdir(UPDATE_DIR):
+            if name != "setup.log":
+                path = os.path.join(UPDATE_DIR, name)
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    _remove(path)
+    except OSError:
+        pass
+
+
 def _remove(path):
     try:
         os.remove(path)
@@ -179,14 +196,51 @@ def _clean_env():
     return env
 
 
+def _in_program_files(folder):
+    """True when `folder` sits under Program Files, where writing needs administrator rights."""
+    folder = os.path.normcase(os.path.abspath(folder))
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        root = os.environ.get(var)
+        if root:
+            root = os.path.normcase(os.path.abspath(root))
+            if folder == root or folder.startswith(root + os.sep):
+                return True
+    return False
+
+
+def _installer_args():
+    """Switches for the silent in-app update. The installer must go to the folder this copy runs
+    from and in the same mode (all users / current user) as the existing install. Left to
+    itself a silent install picks per-user, can't write to Program Files and rolls back."""
+    return ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS",
+            "/RELAUNCH=1", "/DIR=" + APP_DIR, "/LOG=" + os.path.join(UPDATE_DIR, "setup.log"),
+            "/ALLUSERS" if _in_program_files(APP_DIR) else "/CURRENTUSER"]
+
+
+def _run_installer(path):
+    """Start the installer, asking Windows for administrator rights first when the app lives in
+    Program Files (the UAC prompt appears here). Returns True once it has started."""
+    args = _installer_args()
+    if _in_program_files(APP_DIR):
+        import ctypes
+        params = " ".join('"%s"' % a if " " in a else a for a in args)
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, params, None, 0)
+        if rc <= 32:
+            log.warning("installer wasn't started (ShellExecute code %s; UAC refused?)", rc)
+            return False
+        return True
+    subprocess.Popen([path] + args, close_fds=True, env=_clean_env(), creationflags=_DETACHED | _NEW_GROUP)
+    return True
+
+
 def apply(path, kind):
     """Start the install and return True; the caller must then quit the app straight away.
     installer: the Inno Setup installer runs with a progress bar only, then relaunches the app.
     portable: a tiny script waits for this exe to close, swaps the file and starts it again."""
     try:
         if kind == "installer":
-            args = [path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RELAUNCH=1"]
-            subprocess.Popen(args, close_fds=True, env=_clean_env(), creationflags=_DETACHED | _NEW_GROUP)
+            if not _run_installer(path):
+                return False
         else:
             target = os.path.abspath(sys.executable)
             script = os.path.join(UPDATE_DIR, "apply_update.cmd")

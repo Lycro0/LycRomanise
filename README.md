@@ -1,4 +1,4 @@
-# LycRomanise v1.3.0
+# LycRomanise v1.3.1
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -38,6 +38,11 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
 - **Hide the padlock:** turn on "Hide the lock icon" in Settings (`hide_lock_icon`). The padlock never
   appears, and the strip is locked and unlocked only from the tray menu (Lock position / Unlock
   position). If the tray icon isn't running, the padlock is kept so the strip can still be unlocked.
+- **Show it in OBS:** add a Window Capture source and pick "LycRomanise Lyrics" (capture method "Windows 10
+  (1903 and later)"). The strip has real per-pixel transparency by default, so OBS shows it see-through with no
+  filter. To go back to the old colour-key strip, untick "True transparency" in Settings (`true_transparency`)
+  and restart; then OBS sees a black background and needs a Color Key filter set to black. If the strip ever
+  fails to draw with true transparency, the app logs it and falls back to the old strip by itself.
 - **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Check for updates, Open logs
   folder, Quit. There is no taskbar button and no right-click menu.
 - **Settings…** (from the tray) changes karaoke colors, next-line color, font sizes, strip width and
