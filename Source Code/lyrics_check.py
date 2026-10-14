@@ -22,7 +22,7 @@ import re
 
 from romanize.detect import detect_script
 
-log = logging.getLogger("spoti.lyrics")
+log = logging.getLogger("lycro.lyrics")
 
 # A line of lyrics that is really "there are no lyrics" in some language.
 PLACEHOLDER_RE = re.compile(

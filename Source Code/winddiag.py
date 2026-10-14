@@ -6,7 +6,7 @@ import sys
 
 import winsys
 
-log = logging.getLogger("spoti.app")
+log = logging.getLogger("lycro.app")
 
 
 def count_lyric_pixels(app, targets):

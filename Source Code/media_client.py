@@ -13,18 +13,35 @@ import asyncio
 import ctypes
 import logging
 import sys
+import threading
 import time
 from ctypes import wintypes
 from datetime import datetime, timezone
 
-log = logging.getLogger("spoti.media")
+log = logging.getLogger("lycro.media")
 
 # SMTC session ids: Spotify desktop "Spotify.exe" / Store "SpotifyAB.SpotifyMusic_...!Spotify";
 # Spotifast (open source, low-memory Spotify client, spotifast.rocks) "spotifast.exe", or
 # "fastpotify.exe" for installs from before it was renamed;
 # Apple Music for Windows "AppleInc.AppleMusicWin_...!App"; classic "iTunes.exe".
 # Matching is by substring, and "spotify" is not inside "spotifast", so Spotifast is listed on its own.
-APP_MATCHES = ("spotify", "spotifast", "fastpotify", "applemusic", "apple music", "itunes")
+APP_MATCHES = ("spotify", "spotifast", "fastpotify", "applemusic", "apple music", "itunes",
+               # more players (v1.5.0): Tidal, Deezer, Amazon Music, the Windows "Media Player",
+               # foobar2000, MusicBee and YouTube Music desktop apps
+               "tidal", "deezer", "amazonmusic", "zunemusic", "foobar2000", "musicbee",
+               "youtube-music", "youtubemusic", "ytmdesktop")
+
+
+def player_matches():
+    """APP_MATCHES plus anything listed under "extra_players" in config.json. The match is a
+    case-insensitive piece of the Windows media session id; the log lists the ids it saw when
+    nothing matched (e.g. add "vlc", or "chrome" to read YouTube Music in Chrome)."""
+    try:
+        import config
+        extra = tuple(x.lower() for x in config.config_str_list("extra_players"))
+    except Exception:
+        extra = ()
+    return APP_MATCHES + extra
 # Window title fallback: the player's process names (lower case).
 PLAYER_EXES = ("spotify.exe", "spotifast.exe", "fastpotify.exe")
 # These show up instead of a song while an ad plays or when paused / idle.
@@ -92,6 +109,9 @@ class MediaClient:
         self._len_key = None            # (artist, title) being watched
         self._len_prev_ms = 0           # last length seen for the song before it
         self._len_last_ms = 0           # latest length seen for the current song
+        self._poll_lock = threading.Lock()
+        self._loop = None               # the one event loop used for media-session calls
+        self._matches, self._matches_at = None, 0.0
         self._len_first_ms = 0          # first length reported for this song
         self._len_seen_at = 0.0
         self._len_settled = True        # True once the length moved off the first/stale figure
@@ -107,9 +127,20 @@ class MediaClient:
     # ------------------------------------------------------------------ API --
 
     def poll(self):
+        """Thread-safe: the app can poll from more than one worker (e.g. after a stuck one is
+        replaced), and this object's state isn't safe to share. Calls take turns."""
+        if not self._poll_lock.acquire(timeout=10):
+            log.warning("media poll skipped: the previous one is still running")
+            return "error", None
+        try:
+            return self._poll_locked()
+        finally:
+            self._poll_lock.release()
+
+    def _poll_locked(self):
         if smtc_available() and self._smtc_usable():
             try:
-                result = asyncio.run(self._poll_smtc())
+                result = self._run(self._poll_smtc())
                 self._smtc_failures = 0
                 if result is not None:
                     return result
@@ -123,6 +154,32 @@ class MediaClient:
                     log.warning("media controls failed %d times in a row; using the window title for %.0f s",
                                 self._smtc_failures, SMTC_RETRY_AFTER_S)
         return self._poll_window_title()
+
+    def _matches_cached(self):
+        """player_matches(), re-read from config.json at most every 10 s (the file is tiny, but
+        polls come several times a second)."""
+        now = time.monotonic()
+        if self._matches is None or now - self._matches_at > 10.0:
+            self._matches, self._matches_at = player_matches(), now
+        return self._matches
+
+    def _run(self, coro):
+        """Run a coroutine on one long-lived event loop instead of building and tearing one down
+        on every poll. Callers hold _poll_lock, so the loop is never used by two threads at once.
+        A broken or closed loop is replaced."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            loop = self._loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        except BaseException:
+            # Anything unexpected (including a loop left in a bad state): start fresh next time.
+            try:
+                loop.close()
+            except Exception:
+                pass
+            self._loop = None
+            raise
 
     def _smtc_usable(self):
         """False while the media controls are resting after repeated failures. After the rest one
@@ -141,11 +198,12 @@ class MediaClient:
             self._manager = await _Manager.request_async()
         session, session_playing, session_app = None, False, ""
         seen_ids = []
+        matches = self._matches_cached()
         for s in self._manager.get_sessions():
             try:
                 app_id = (s.source_app_user_model_id or "").lower()
                 seen_ids.append(app_id)
-                if not any(m in app_id for m in APP_MATCHES):
+                if not any(m in app_id for m in matches):
                     continue
                 playing = int(getattr(s.get_playback_info().playback_status, "value",
                                       s.get_playback_info().playback_status)) == PLAYING

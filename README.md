@@ -1,4 +1,4 @@
-# LycRomanise v1.4.2
+# LycRomanise v1.5.0
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -22,7 +22,8 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
 - Romanizes Korean, Japanese and Chinese lyrics (always on, no translation). Cyrillic, Greek,
   Hebrew, Arabic-script and Devanagari lyrics are romanized too, including mixed-script lines.
   Hebrew and Arabic are written without most vowels, so their vowels are guessed: treat them as approximate.
-- Spells out numbers and symbols before romanizing (`24` becomes "twenty-four", `&` becomes "and").
+- Shows numbers and symbols as they are written in the lyrics.
+- Shows a ♪ during long instrumental breaks instead of leaving the last lyric on screen.
 - Splits long lines into balanced chunks; text that is too wide shrinks to fit, then wraps.
 - Ignores Spotify's DJ announcements ("Up next", DJ X) and ads: no lookup, no title card.
 - Runs as its own app with no console window, with a tray icon.
@@ -44,12 +45,12 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
   (`show_in_taskbar`, applies live). If the strip ever fails to draw with true transparency (or Pillow / Segoe UI
   is missing), the app logs it and falls back to the old colour-key strip, which OBS shows with a black
   background (add a Color Key filter set to black).
-- **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Mobile view, Show mobile address / QR, Check for updates, Open logs
+- **Tray menu:** Lock/Unlock position, Settings…, Start with Windows, Mobile view, Show mobile address / QR, Wrong lyrics? Pick another, Look up lyrics again, Lyrics earlier / later / Reset timing, Check for updates, Open logs
   folder, Quit. By default there is no taskbar button (see "Show a taskbar button" in Settings) and no right-click menu.
-- **Settings…** (from the tray) changes karaoke colors, next-line color, font sizes, strip width and
-  height, lyric offset, outline size and colour, the title card, the mobile view, hiding the lock icon, the taskbar button and Start with Windows. Changes apply live and are saved
+- **Settings…** (from the tray) has four tabs: Look (colours, outline, title card), Text & size (font sizes, strip size, lyric offset, line splitting), Behaviour (lock icon, taskbar button, reset position, Start with Windows) and Phone & OBS (mobile view, hide the strip on this PC). Changes apply live and are saved
   to `appearance.json`. "Reset to defaults" restores the built-in look.
 - **Lyric offset** shifts all lyrics in 100 ms steps (`lyric_offset_ms`).
+- **Per-song timing:** Ctrl+Alt+Left / Right nudges the current song's lyrics by 100 ms and remembers it for that song (`song_offsets.json`); Ctrl+Alt+Down resets it.
 - **Title card** (`show_title_card`, on by default): "Artist - Song" shows for about 10 seconds when a song starts (it ends
   sooner if the first lyric begins before that). Only the artist and title are shown, no lyric under it. It is drawn in the
   "Already sung" colour with the text outline colour you pick.
@@ -74,7 +75,7 @@ word, so the fill assumes an even pace across the line.
 
 ## Lyrics
 
-Lyrics come only from LRCLIB. Whatever comes back is checked first (`lyrics_check.py`), because
+Lyrics come from your own `.lrc` files first (see below), then LRCLIB. Whatever comes back is checked first (`lyrics_check.py`), because
 showing nothing is better than showing the wrong song:
 
 1. "No lyrics" placeholders ("纯音乐，请欣赏", "instrumental") are dropped.
@@ -106,7 +107,7 @@ up again if the length later changes by more than 3 s. The log line
 `provider_health.json`; delete it to reset). If LRCLIB was erroring, the song is retried after 15,
 30 and 60 seconds.
 
-Results are cached in `lyrics_cache.json`, so replays make no request. Lyrics coverage is not
+Results are cached in `lyrics_cache.json` (and songs LRCLIB doesn't have are remembered for 6 hours in `lyrics_missing.json`), so replays make no request. Lyrics coverage is not
 universal: LRCLIB is community-made, so some tracks have no synced lyrics. Lyrics load when a song starts.
 
 ## Updates
@@ -151,10 +152,10 @@ When installed, settings, cache and logs are in `%LOCALAPPDATA%\LycRomanise`. Fr
 | --- | --- |
 | `appearance.json` | colors, sizes, offset, title card, lock icon (changed in Settings) |
 | `window_state.json` | strip position and lock state |
-| `config.json` | optional: `"check_updates": false` turns the update check off |
+| `config.json` | optional: `"check_updates": false` turns the update check off; `"extra_players"` and `"lyrics_folders"` (see above) |
 | `lyrics_cache.json` | cached lyrics |
 | `provider_health.json` | LRCLIB outage state |
-| `logs/spoti-lyrics.log` | everything, rotating daily, 14 days kept |
+| `logs/lycromanise.log` | everything, rotating daily, 14 days kept |
 | `logs/crash-native.log` | hard interpreter crashes |
 
 The log says why a lookup missed: no results, the HTTP status, or every candidate that was rejected
@@ -171,12 +172,13 @@ config.py           settings files and paths
 config_editor.py    Settings window
 updater.py          GitHub update check and install
 update_dialog.py    the update window
+lyrics_picker.py    the "Wrong lyrics?" window
+song_offsets.py     per-song timing offsets
 tray.py             tray icon and menu
 winsys.py           single instance, start with Windows, DPI, click-through
 paths.py            where files live
 version.py          app version
 layout.py           line splitting and karaoke fill
-textnorm.py         numbers and symbols to words
 drawing.py          colors and outlined text
 applog.py           file logging and crash capture
 selftest.py         the --selftest check
@@ -185,12 +187,26 @@ romanize/           korean.py, japanese.py, chinese.py, others.py, detect.py
 assets/             lyrics-overlay.ico
 ```
 
+## Your own lyrics, more players, wrong lyrics
+
+- **Your own `.lrc` files:** save synced lyrics as `Artist - Title.lrc` (or `Title - Artist.lrc`, or `Title.lrc`)
+  in the `lyrics` folder next to `lyrics_cache.json`, or in any folder listed in `config.json`:
+  `"lyrics_folders": ["D:\\Music\\Lyrics"]`. They are used before LRCLIB. Use *Look up lyrics again* after editing a file.
+- **More players:** Spotify, Spotifast, Apple Music, iTunes, Tidal, Deezer, Amazon Music, Windows Media Player,
+  foobar2000, MusicBee and the YouTube Music desktop apps work out of the box. For anything else add part of its
+  Windows media-session id to `config.json`: `"extra_players": ["vlc", "chrome"]` (the log lists the ids Windows
+  reported when nothing matched). A browser tab such as YouTube is read like any other player, so only add `chrome` or `msedge` if you want that.
+- **Wrong lyrics?** Tray menu > *Wrong lyrics? Pick another...* lists the other lyric sets LRCLIB has for the song
+  (closest in length first). Double-click one to use it; it is remembered for that song.
+
 ## Romanization
 
 - **Korean:** `romanize/korean.py` implements Revised Romanization from scratch, with no dictionary
-  and no external service. It handles liaison (한국어 becomes `hangugeo`) but not dictionary-dependent
-  rules such as palatalization or tensification.
-- **Japanese:** `pykakasi`. **Chinese:** `pypinyin`.
+  and no external service. It applies the standard pronunciation rules (liaison, nasalization such as 합니다 -> `hamnida`,
+  ㄹ assimilation such as 신라 -> `silla`, ㅎ aspiration, palatalization). Like RR itself it does not write
+  tensification, and dictionary-dependent irregular readings are not handled.
+- **Japanese:** `pykakasi`, with fixes in `romanize/japanese.py`: particles (は wa, へ e, を o), the everyday reading of common words and lone kanji (今日, 君, 私...), and long vowels. pykakasi has no grammar, so a は inside a hiragana run is only turned into `wa` at the end of the run (これは, あなたは).
+- **Chinese:** `pypinyin`, with tone changes (不, 一) where the installed version supports them and tidied punctuation.
 - **Others:** `romanize/others.py` (Cyrillic, Greek, Hebrew, Arabic, Devanagari).
 
 ## Troubleshooting
@@ -215,6 +231,13 @@ find which piece breaks on your machine, set one of these before starting:
 lists what Windows is showing, and `reading playback from media session ...` names the one in use. If
 your player is listed there but not read, its name needs adding to `APP_MATCHES` in `media_client.py`.
 
-**Wrong lyrics or no lyrics:** play the song once and check `logs/spoti-lyrics.log`. The
+**Wrong lyrics or no lyrics:** play the song once and check `logs/lycromanise.log`. The
 `looking up lyrics for ...` and `lrclib: ...` lines show the length used and the entry chosen or why
 every candidate was rejected.
+
+## Privacy and security notes
+
+- Logs (`logs/`) keep song titles and artists for 14 days, and `lyrics_cache.json` lists the songs you played. Don't share them publicly.
+- "Start with Windows" is off by default; turn it on in Settings if you want it.
+- The mobile page only answers devices on your local network (private address ranges); other addresses are refused.
+- Automatic update checks never open your browser. If this copy can't update itself, use tray > Check for updates.

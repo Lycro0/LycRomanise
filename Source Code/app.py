@@ -29,15 +29,16 @@ import drawing
 from drawing import (TextMeter, _draw_outline_only, _draw_outlined_text, _ease_out_cubic, _lerp_rgb,
                      _rgb_to_hex)
 from selftest import run_selftest
-from lyrics_provider import fetch_lyrics, is_non_song, outage_since
+import song_offsets
+import lyrics_provider
+from lyrics_provider import fetch_lyrics, forget as forget_lyrics, is_non_song, outage_since
 from romanize import detect_script, needs_romanization, romanize_line
 from media_client import MediaClient
 import updater
 import update_dialog
 import mobile_server
-from textnorm import normalize
 
-log = logging.getLogger("spoti.app")
+log = logging.getLogger("lycro.app")
 
 from version import __version__, RELEASES_URL
 
@@ -145,15 +146,15 @@ def _load_appearance():
             return default
 
     DESKTOP_BG = s.get("desktop_bg", DESKTOP_BG)
-    DESKTOP_NEXT_RGB = tuple(s.get("next_line_rgb", DESKTOP_NEXT_RGB))
+    DESKTOP_NEXT_RGB = tuple(s["next_line_rgb"])
     DESKTOP_WIDTH = num("desktop_width", int, DESKTOP_WIDTH)
     DESKTOP_HEIGHT = num("desktop_height", int, DESKTOP_HEIGHT)
     DESKTOP_CURR_SIZE = num("curr_font_size", int, DESKTOP_CURR_SIZE)
     DESKTOP_NEXT_SIZE = num("next_font_size", int, DESKTOP_NEXT_SIZE)
     DESKTOP_CURR_MIN_SIZE = num("curr_font_min_size", int, DESKTOP_CURR_MIN_SIZE)
     DESKTOP_NEXT_MIN_SIZE = num("next_font_min_size", int, DESKTOP_NEXT_MIN_SIZE)
-    KARAOKE_UNSUNG_RGB = tuple(s.get("karaoke_unsung_rgb", KARAOKE_UNSUNG_RGB))
-    KARAOKE_SUNG_RGB = tuple(s.get("karaoke_sung_rgb", KARAOKE_SUNG_RGB))
+    KARAOKE_UNSUNG_RGB = tuple(s["karaoke_unsung_rgb"])
+    KARAOKE_SUNG_RGB = tuple(s["karaoke_sung_rgb"])
     LYRIC_OFFSET_S = num("lyric_offset_ms", float, 0.0) / 1000.0
     OUTLINE_SIZE = max(0.0, min(4.0, num("outline_size", float, OUTLINE_SIZE)))
     SPAWN_Y_PERCENT = max(0, min(90, num("spawn_y_percent", float, SPAWN_Y_PERCENT)))
@@ -183,16 +184,21 @@ class LyricsApp:
 
         # --- current track / lyrics state
         self.current_track_id = None
+        self.song_offset_ms = 0       # this song's own timing tweak (song_offsets.py)
+        self._song_key = None
+        self._last_frame_sig = None
+        self._last_frame_t = 0.0
         self._lookup_lengths = {}        # track id -> track length (ms) its lyrics were looked up with
         self._relookups = 0
         self._relookup_busy = False
+        self._picker = None             # the open "Wrong lyrics?" window, if any
         self._len_candidate = None
         self.track = None
         self.title_text = ""
         self.duration_s = 0.0
         self.lyrics_state = "none"     # none | pending | ready | missing
         self.lyrics = []               # [(timestamp_s, raw_text)]
-        self.norm_lines = []           # lyrics with numbers/symbols spelled out
+        self.norm_lines = []           # the lyric text, one entry per line
         self.song_hint = None          # 'ko' | 'ja' | 'zh' | ... for the song as a whole
         self.segments = []             # displayed lines (long lyric lines are split into several)
         self.seg_starts = []
@@ -444,7 +450,7 @@ class LyricsApp:
 
         - Left-click and drag to move it (only while unlocked). Where you leave
           it is remembered for next time.
-        - No right-click menu: use the tray icon (lock, settings, quit).
+        - Lock, settings and quit are in the tray menu.
         - The small padlock pins it in place; once locked, on Windows it also
           becomes click-through. Whether it was locked is remembered too. Settings can
           hide the padlock, leaving the tray menu as the only way to lock and unlock.
@@ -576,6 +582,11 @@ class LyricsApp:
                 "mobile_info": self._show_mobile_info,
                 "about": lambda: winsys.open_url(RELEASES_URL),
                 "check_update": self.check_for_update,
+                "lookup_again": self._lookup_again,
+                "wrong_lyrics": self._wrong_lyrics,
+                "lyrics_earlier": lambda: self._nudge_song_offset(-100),
+                "lyrics_later": lambda: self._nudge_song_offset(+100),
+                "lyrics_timing_reset": lambda: self._nudge_song_offset(None),
                 "open_logs": self._open_logs_folder,
                 "quit": self._quit,
             },
@@ -680,7 +691,7 @@ class LyricsApp:
         """Ask GitHub for the latest release (background thread). Automatic on startup;
         tray > Check for updates does it on demand and always answers."""
         if manual and self._update_release:
-            self._offer_update(self._update_release)
+            self._offer_update(self._update_release, manual=True)
             return
 
         def work():
@@ -696,7 +707,7 @@ class LyricsApp:
             return
         self._update_release = found
         if manual or updater.skipped_tag() != found["tag"]:
-            self._offer_update(found)
+            self._offer_update(found, manual)
         else:
             log.info("update %s was skipped by the user", found["tag"])
 
@@ -706,13 +717,19 @@ class LyricsApp:
         wait_ms = int(max(0.0, b["until"] - time.perf_counter()) * 1000) + 100 if b else 0
         self.root.after(wait_ms, show)
 
-    def _offer_update(self, release):
+    def _offer_update(self, release, manual=False):
         """The "update now?" window. Copies that can't update themselves (running from source, no
         installer file on the release, read-only folder) get the old behaviour: the release page."""
         if not updater.can_self_update(release):
-            text = "New version %s available: opening the download page" % release["tag"]
-            self._banner_after_current(lambda: self._set_banner(text, UPDATE_BANNER_S))
-            winsys.open_url(release["url"])
+            # Can't update itself (running from source, read-only folder, no installer on the release).
+            # Never open the browser on its own: say so, and open the page only when asked.
+            if manual:
+                self._banner_after_current(lambda: self._set_banner(
+                    "New version %s available: opening the download page" % release["tag"], UPDATE_BANNER_S))
+                winsys.open_url(release["url"])
+            else:
+                self._banner_after_current(lambda: self._set_banner(
+                    "New version %s available: tray > Check for updates" % release["tag"], UPDATE_BANNER_S))
             return
         try:
             if self._update_win is not None:
@@ -1028,6 +1045,7 @@ class LyricsApp:
             self._results.put(("track", status, track, received))
             if status == "ok" and track and track["id"] != known_track_id:
                 track = self._settle_length(player, track)
+                self._poll_busy = False   # done with the player: later polls may run while lyrics are fetched
                 self._lookup_lengths = {track["id"]: track.get("duration_ms") or 0}
                 log.info("looking up lyrics for %r (track length %.0fs)", track["name"],
                          (track.get("duration_ms") or 0) / 1000.0)
@@ -1039,6 +1057,8 @@ class LyricsApp:
         except Exception:
             log.exception("poll worker error (recovering)")
             self._results.put(("track", "error", None, time.perf_counter()))
+        finally:
+            self._poll_busy = False
 
     def _settle_length(self, player, track):
         """Right after a skip Windows can report the previous song's length for a moment, and a
@@ -1100,6 +1120,131 @@ class LyricsApp:
             return          # same lyrics: nothing to redraw
         self._handle_lyrics(tid, result)
 
+    def _lookup_again(self):
+        """Tray > "Look up lyrics again": forget what is stored for this song (its lyrics or a
+        remembered "not found") and ask the lyrics site again. A site outage keeps what is shown."""
+        track, tid = self.track, self.current_track_id
+        if not track or tid is None:
+            self._set_banner("Nothing is playing", 3.0)
+            return
+        if self._relookup_busy or self.lyrics_state == "pending":
+            self._set_banner("Already looking up the lyrics...", 3.0)
+            return
+        length = self._lookup_lengths.get(tid) or track.get("duration_ms") or 0
+        forget_lyrics(track["name"], track["artist"], length)
+        self._relookup_busy = True
+        self._set_banner("Looking up the lyrics again...", 4.0)
+        log.info("look up again: %r - %r", track["artist"], track["name"])
+
+        def work():
+            asked = time.monotonic()
+            failed = False
+            try:
+                result = fetch_lyrics(track["name"], track["artist"], track["album"], length)
+            except Exception:
+                log.exception("lyrics look-up failed")
+                result, failed = None, True
+            outage = failed or (not (result and result[0]) and outage_since(asked))
+            self.post(lambda: self._lookup_again_done(tid, result, outage))
+        threading.Thread(target=work, daemon=True, name="lyrics-lookup-again").start()
+
+    def _lookup_again_done(self, tid, result, outage):
+        self._relookup_busy = False
+        if tid != self.current_track_id:
+            return
+        if outage:
+            self._set_banner("Couldn't reach the lyrics site", 4.0)
+            return
+        if result and result[0]:
+            if list(result[0]) != self.lyrics:
+                self._handle_lyrics(tid, result)
+            self._set_banner("Lyrics found", 3.0)
+        else:
+            self._set_banner("Still no synced lyrics for this song", 4.0)
+
+    def _wrong_lyrics(self):
+        """Tray > "Wrong lyrics? Pick another...": list the other lyric sets the lyrics site has for
+        this song and switch to the one the user picks (remembered for next time)."""
+        track, tid = self.track, self.current_track_id
+        if not track or tid is None:
+            self._set_banner("Nothing is playing", 3.0)
+            return
+        if self._picker is not None:
+            try:
+                self._picker.win.deiconify()
+                self._picker.win.lift()
+                return
+            except tk.TclError:
+                self._picker = None
+        length = self._lookup_lengths.get(tid) or track.get("duration_ms") or 0
+        try:
+            import lyrics_picker
+            win = tk.Toplevel(self.root)
+            picker = lyrics_picker.LyricsPicker(
+                win, "%s - %s" % (track["artist"], track["name"]),
+                on_pick=lambda alt: self._picked_lyrics(tid, track, length, alt),
+                on_close=lambda: setattr(self, "_picker", None))
+            self._picker = picker
+        except Exception:
+            log.exception("couldn't open the wrong-lyrics window")
+            self._picker = None
+            self._set_banner("Couldn't open the lyrics list", 3.0)
+            return
+
+        def work():
+            asked = time.monotonic()
+            try:
+                alts = lyrics_provider.search_alternatives(track["name"], track["artist"], length)
+            except Exception:
+                log.exception("wrong-lyrics search failed")
+                alts = []
+            note = "Couldn't reach the lyrics site." if (not alts and outage_since(asked)) else None
+            self.post(lambda: self._picker_results(picker, alts, note))
+        threading.Thread(target=work, daemon=True, name="lyrics-alternatives").start()
+
+    def _picker_results(self, picker, alts, note):
+        if picker is not self._picker:
+            return          # closed (or replaced) while the search ran
+        try:
+            picker.set_results(alts, note)
+        except tk.TclError:
+            self._picker = None
+
+    def _picked_lyrics(self, tid, track, length, alt):
+        try:
+            result = lyrics_provider.use_alternative(track["name"], track["artist"], length, alt)
+        except Exception:
+            log.exception("couldn't apply the chosen lyrics")
+            result = (None, None)
+        if tid != self.current_track_id:
+            return          # the song changed meanwhile: the choice is still remembered for it
+        if result and result[0]:
+            self._handle_lyrics(tid, result)
+            self._set_banner("Lyrics changed", 3.0)
+        else:
+            self._set_banner("Those lyrics couldn't be used", 4.0)
+
+    def _nudge_song_offset(self, delta_ms):
+        """Shift this song's lyrics by delta_ms (None = back to 0) and remember it for next time."""
+        if self._song_key is None or not self.track:
+            self._set_banner("Nothing is playing", 3.0)
+            return
+        new = 0 if delta_ms is None else self.song_offset_ms + delta_ms
+        self.song_offset_ms = song_offsets.set_ms(self._song_key, new)
+        text = ("Lyrics timing for this song: %+d ms" % self.song_offset_ms) if self.song_offset_ms \
+            else "Lyrics timing for this song reset"
+        self._set_banner(text, 2.5)
+        self._update_display(self._estimate_position_s())
+
+    HOTKEYS = {1: (0x0002 | 0x0001, 0x25), 2: (0x0002 | 0x0001, 0x27), 3: (0x0002 | 0x0001, 0x28)}  # Ctrl+Alt + Left / Right / Down
+
+    def _on_hotkey(self, hid):
+        """Runs on the hotkey thread: only hands the action to the Tk thread."""
+        action = {1: lambda: self._nudge_song_offset(-100), 2: lambda: self._nudge_song_offset(+100),
+                  3: lambda: self._nudge_song_offset(None)}.get(hid)
+        if action:
+            self.post(action)
+
     RETRY_DELAYS_S = (15, 30, 60)
 
     def _retry_after_outage(self, track, result):
@@ -1137,7 +1282,6 @@ class LyricsApp:
     # ------------------------------------------------------ track / lyrics --
 
     def _handle_track(self, status, track, received):
-        self._poll_busy = False
         if status == "error":
             return   # couldn't find out: keep showing what we had
         self._clear_notice()   # the player answered: any earlier notice is out of date
@@ -1191,6 +1335,8 @@ class LyricsApp:
         self._reset_track_state()
         self.current_track_id = track["id"]
         self.track = track
+        self._song_key = song_offsets.make_key(track.get("artist"), track.get("name"))
+        self.song_offset_ms = song_offsets.get_ms(self._song_key)
         self._relookups = 0
         self._relookup_busy = False
         self._len_candidate = None
@@ -1199,12 +1345,11 @@ class LyricsApp:
         self._fast_poll_until = time.perf_counter() + FAST_POLL_AFTER_CHANGE_S
 
     def _make_title(self, track):
-        """'Artist - Song', with numbers/symbols spelled out and non-Latin
-        text romanized."""
+        """'Artist - Song', with non-Latin text romanized."""
         if not track or is_non_song(track.get("name"), track.get("artist")):
             return ""          # the Spotify DJ ("Up next" / DJ X) and ads get no title card
-        artist = normalize(track.get("artist", ""))
-        name = normalize(track.get("name", ""))
+        artist = (track.get("artist") or "").strip()
+        name = (track.get("name") or "").strip()
         text = f"{artist} - {name}" if artist and name else (artist or name)
         if needs_romanization(text):
             text = romanize_line(text, detect_script(text))
@@ -1222,9 +1367,7 @@ class LyricsApp:
             return
 
         self.lyrics = list(synced)
-        # Numbers and symbols -> the words a singer would say, before anything
-        # else (romanizing, splitting) sees the text.
-        self.norm_lines = [normalize(text) for _ts, text in self.lyrics]
+        self.norm_lines = [text for _ts, text in self.lyrics]
         self.song_hint = detect_script(" ".join(self.norm_lines))
 
         self.lyrics_state = "ready"
@@ -1276,7 +1419,7 @@ class LyricsApp:
     def _estimate_position_s(self):
         """Playback position for lyric timing (raw position plus the user's
         offset), so lines and the fill move smoothly between polls."""
-        return self._raw_position_s() + LYRIC_OFFSET_S
+        return self._raw_position_s() + LYRIC_OFFSET_S + self.song_offset_ms / 1000.0
 
     def _line_tick(self):
         """Re-check which line is current on a much shorter cadence than the
@@ -1477,9 +1620,29 @@ class LyricsApp:
         seg = self.segments[self.current_index]
         return layout.seg_fraction(seg, self.line_infos[seg.line], self._estimate_position_s())
 
+    FRAME_KEEPALIVE_S = 1.0
+
+    def _frame_changed(self):
+        """False when the strip would look exactly as it did last frame. Drawing is the costly part
+        (an image is built and handed to Windows), so an idle or paused strip skips it. Anything
+        that animates always draws, and a frame is forced at least once a second as a safety net."""
+        now = time.perf_counter()
+        animating = (self._anim_start_perf is not None and now - self._anim_start_perf < LINE_ANIM_SECONDS + 0.1)
+        sig = (self._scene(), bool(self.desktop_locked), bool(self._desktop_hidden()),
+               (self._active_notice() or {}).get("text"), (self._active_banner() or {}).get("text"),
+               round(self._current_fill_fraction() * 1000), self.strip_w, self.strip_h, self.scale,
+               self.desktop_curr_size, self.desktop_next_size, id(self._alpha),
+               getattr(self._alpha, "failed", False))
+        if not animating and sig == self._last_frame_sig and now - self._last_frame_t < self.FRAME_KEEPALIVE_S:
+            return False
+        self._last_frame_sig, self._last_frame_t = sig, now
+        return True
+
     def _redraw_desktop_canvas(self):
         if self.desktop_canvas is None:
             return
+        if not self._frame_changed():
+            return           # nothing moved since the last frame: no need to draw it again
         if self._alpha is None:
             self._paint_scene(self.desktop_canvas)
             return
@@ -1621,22 +1784,6 @@ class LyricsApp:
             color = _rgb_to_hex(_lerp_rgb(KARAOKE_SUNG_RGB, KARAOKE_UNSUNG_RGB, t))
             canvas.create_text(x, y, text=ch, font=font, fill=color, anchor="nw")
 
-def _default_autostart_on_first_run():
-    """'Start with Windows' is on by default: switch it on once for a brand-new install (no settings
-    file yet). The marker means a later "off" is never overridden."""
-    marker = os.path.join(config.BASE_DIR, "autostart_default_done")
-    try:
-        if os.path.exists(marker):
-            return
-        fresh = not os.path.exists(config.APPEARANCE_PATH) or config.defaults_were_reset
-        if fresh and winsys.is_windows() and not winsys.autostart_enabled():
-            winsys.set_autostart(True)
-        with open(marker, "w", encoding="utf-8") as f:
-            f.write("1")
-    except Exception:
-        log.exception("couldn't apply the default for 'Start with Windows'")
-
-
 def main():
     if "--selftest" in sys.argv[1:]:
         sys.exit(run_selftest())
@@ -1648,8 +1795,8 @@ def main():
     if not winsys.acquire_single_instance():
         log.info("another copy is already running; exiting")
         return
+    winsys.migrate_legacy_autostart()   # v1.5.0: the old entry had a different name
     winsys.refresh_autostart()          # keep the Run entry pointing at where the app is now
-    _default_autostart_on_first_run()
     if winsys.env_flag("SPOTI_DEBUG_NO_DPI"):
         dpi = None
         log.warning("SPOTI_DEBUG_NO_DPI set: not enabling DPI awareness")
@@ -1662,6 +1809,7 @@ def main():
     try:
         application = LyricsApp(root)
         application.start_tray()
+        winsys.start_hotkeys(LyricsApp.HOTKEYS, application._on_hotkey)
         root.mainloop()
     except KeyboardInterrupt:
         sys.exit(0)

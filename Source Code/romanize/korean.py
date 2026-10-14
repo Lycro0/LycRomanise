@@ -1,27 +1,17 @@
 """
 Korean -> Latin romanization (Revised Romanization of Korean, RR 2000).
 
-This is a rule-based, dictionary-free implementation. It handles:
-  - Standard Hangul syllable decomposition (initial / vowel / final)
-  - Liaison (연음): a syllable-final consonant is carried over as the
-    onset of the next syllable when that next syllable starts with a
-    "null" initial (i.e. it begins with a vowel sound), e.g.
-    한국어 -> "hangugeo", not "hangug-eo"
-  - Consonant clusters (겹받침) such as ㄳ, ㄵ, ㄺ, ㅄ splitting correctly
-    during liaison (e.g. 닭이 -> "dalgi", not "dakgi")
-
-What it deliberately does NOT do, because these require a pronunciation
-dictionary rather than character rules, and would need per-word exceptions:
-  - Palatalization (구개음화), e.g. 굳이 is technically pronounced "guji"
-    rather than the "gud-i" this module would produce
-  - Tensification (경음화) after certain finals, e.g. 없어 is often heard
-    as "eopsseo" rather than the "eopseo" this module produces
-  - Word-specific irregular batchim readings (e.g. 밟다 vs 넓다, which
-    read the same 래 cluster two different ways)
-
-For the vast majority of song lyrics this still reads very close to how
-a native speaker would actually pronounce the line, which is the goal
-for a "romanized lyrics" display.
+Rule-based and dictionary-free. Before writing the letters it applies the standard
+pronunciation rules between neighbouring syllables, the way RR transcribes them:
+  - liaison (연음): a final consonant moves onto a following vowel, 한국어 -> hangugeo
+  - consonant clusters (겹받침) split correctly during liaison, 닭이 -> dalgi
+  - nasalization (비음화): 합니다 -> hamnida, 국물 -> gungmul, 먹는다 -> meongneunda
+  - ㄹ assimilation: 신라 -> silla, 종로 -> jongno, 심리 -> simni
+  - ㅎ aspiration (격음화): 좋다 -> jota, 놓고 -> noko, 입학 -> ipak
+  - palatalization (구개음화): 같이 -> gachi, 굳이 -> guji, 닫히다 -> dachida
+  - compatibility jamo such as ㅋㅋ / ㅠㅠ are read too
+As RR itself does, tensification (경음화) is not written (학교 -> hakgyo, 합계 -> hapgye).
+Word-specific irregularities that need a dictionary (e.g. 밟다 vs 넓다) are not handled.
 """
 
 SBASE = 0xAC00
@@ -94,45 +84,114 @@ def _decompose(ch: str):
     return lead, vowel, tail
 
 
+K_TAILS = {1, 2, 3, 9, 24}
+T_TAILS = {7, 19, 20, 22, 23, 25, 27}
+P_TAILS = {14, 17, 18, 26}
+ASPIRATE = {0: 15, 3: 16, 12: 14}          # ㄱ ㄷ ㅈ -> ㅋ ㅌ ㅊ after ㅎ
+
+COMPAT = {
+    "ㄱ": "g", "ㄲ": "kk", "ㄴ": "n", "ㄷ": "d", "ㄸ": "tt", "ㄹ": "r", "ㅁ": "m", "ㅂ": "b", "ㅃ": "pp",
+    "ㅅ": "s", "ㅆ": "ss", "ㅇ": "ng", "ㅈ": "j", "ㅉ": "jj", "ㅊ": "ch", "ㅋ": "k", "ㅌ": "t", "ㅍ": "p",
+    "ㅎ": "h", "ㅏ": "a", "ㅐ": "ae", "ㅑ": "ya", "ㅒ": "yae", "ㅓ": "eo", "ㅔ": "e", "ㅕ": "yeo", "ㅖ": "ye",
+    "ㅗ": "o", "ㅘ": "wa", "ㅙ": "wae", "ㅚ": "oe", "ㅛ": "yo", "ㅜ": "u", "ㅝ": "wo", "ㅞ": "we", "ㅟ": "wi",
+    "ㅠ": "yu", "ㅡ": "eu", "ㅢ": "ui", "ㅣ": "i",
+}
+
+
+def _apply_rules(sy):
+    """sy: list of [lead, vowel, tail, lead_str_or_None, tail_str_or_None] for one run of syllables.
+    Changes them in place according to the pronunciation rules between each syllable and the next."""
+    for i in range(len(sy) - 1):
+        a, b = sy[i], sy[i + 1]
+        t, lead, vowel = a[2], b[0], b[1]
+        if t == 0:
+            continue
+        if lead == 11:                                   # vowel start: palatalization, else liaison later
+            if vowel == 20 and t in (7, 25):
+                a[2] = 0
+                b[0] = 12 if t == 7 else 14
+            continue
+        if lead == 18 and vowel == 20 and t == 7:        # 닫히 -> 다치
+            a[2], b[0] = 0, 14
+            continue
+        if t in (27, 6, 15) and lead in ASPIRATE:        # ㅎ + ㄱ/ㄷ/ㅈ
+            b[0] = ASPIRATE[lead]
+            a[2] = {27: 0, 6: 4, 15: 8}[t]
+            continue
+        if t in (27, 6, 15) and lead == 9 and t == 27:   # 좋소 -> josso
+            b[0], a[2] = 10, 0
+            continue
+        if t == 27 and lead in (2, 6):                   # 놓는 -> nonneun
+            a[2] = 4
+            t = 4
+        if lead == 18 and t in K_TAILS | T_TAILS | P_TAILS:   # ㄱ/ㄷ/ㅂ/ㅈ + ㅎ
+            if t in (1, 24, 2, 3):
+                b[0], a[2] = 15, 0
+            elif t in (17, 26):
+                b[0], a[2] = 17, 0
+            elif t in (22, 23):
+                b[0], a[2] = 14, 0
+            else:
+                b[0], a[2] = 16, 0
+            continue
+        group = "k" if t in K_TAILS else "t" if t in T_TAILS else "p" if t in P_TAILS else None
+        if lead in (2, 6) and group:                    # stop + ㄴ/ㅁ -> nasal
+            a[4] = {"k": "ng", "t": "n", "p": "m"}[group]
+            continue
+        if lead == 5:                                    # ㄹ after another consonant
+            if t == 4:                                   # ㄴ+ㄹ -> ll
+                a[4], b[3] = "l", "l"
+            elif t in (8, 11, 12, 13, 15):               # ㄹ+ㄹ -> ll
+                b[3] = "l"
+            elif group in ("k", "p") or t in (16, 21):   # ㄱ ㅂ ㅁ ㅇ + ㄹ -> n (+ nasal)
+                b[3] = "n"
+                if group == "k":
+                    a[4] = "ng"
+                elif group == "p":
+                    a[4] = "m"
+            continue
+        if lead == 2 and t in (8, 11, 12, 13, 15):       # ㄹ+ㄴ -> ll
+            b[3] = "l"
+
+
 def romanize(text: str) -> str:
-    """Romanize a line of Korean text (Revised Romanization + liaison)."""
+    """Romanize a line of Korean text (Revised Romanization with the pronunciation rules above)."""
     chars = list(text)
     n = len(chars)
     out = []
     i = 0
     while i < n:
         ch = chars[i]
+        if ch in COMPAT:
+            out.append(COMPAT[ch])
+            i += 1
+            continue
         if not _is_hangul_syllable(ch):
             out.append(ch)
             i += 1
             continue
-
-        lead, vowel, tail = _decompose(ch)
-        nxt = chars[i + 1] if i + 1 < n else None
-        next_is_vowel_start = (
-            nxt is not None
-            and _is_hangul_syllable(nxt)
-            and _decompose(nxt)[0] == NULL_CHOSEONG_INDEX
-        )
-
-        syll = CHO[lead] + JUNG[vowel]
-
-        if tail == 0:
-            out.append(syll)
-            i += 1
-            continue
-
-        isolated, remain, liaison_cho = JONG[tail]
-
-        if next_is_vowel_start:
-            if remain is not None:
-                syll += remain
-            out.append(syll)
-            if liaison_cho is not None:
-                out.append(CHO[liaison_cho])
-        else:
-            out.append(syll + isolated)
-
-        i += 1
-
+        j = i
+        while j < n and _is_hangul_syllable(chars[j]):
+            j += 1
+        sy = [list(_decompose(c)) + [None, None] for c in chars[i:j]]
+        _apply_rules(sy)
+        for k, (lead, vowel, tail, lead_s, tail_s) in enumerate(sy):
+            syll = (lead_s if lead_s is not None else CHO[lead]) + JUNG[vowel]
+            if tail == 0:
+                out.append(syll)
+                continue
+            if tail_s is not None:
+                out.append(syll + tail_s)
+                continue
+            isolated, remain, liaison_cho = JONG[tail]
+            nxt = sy[k + 1] if k + 1 < len(sy) else None
+            if nxt is not None and nxt[0] == NULL_CHOSEONG_INDEX:
+                if remain is not None:
+                    syll += remain
+                out.append(syll)
+                if liaison_cho is not None:
+                    out.append(CHO[liaison_cho])
+            else:
+                out.append(syll + isolated)
+        i = j
     return "".join(out)

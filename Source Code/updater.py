@@ -21,12 +21,17 @@ import requests
 from paths import APP_DIR, DATA_DIR, FROZEN
 from version import __version__, GITHUB_REPO, RELEASES_URL
 
-log = logging.getLogger("spoti.update")
+log = logging.getLogger("lycro.update")
 API_URL = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
 
 EXE_NAME = "LycRomanise.exe"
 SETUP_NAME = "LycRomanise_Setup.exe"
 UPDATE_DIR = os.path.join(tempfile.gettempdir(), "LycRomanise_update")   # temp: nothing lingers in the app data
+
+
+def _cmd(text):
+    """Make a path safe inside set "X=..." in a batch file (a % would otherwise be read as a variable)."""
+    return str(text).replace("%", "%%")
 SKIP_PATH = os.path.join(DATA_DIR, "skipped_update.txt")
 _ALLOWED_HOSTS = ("github.com", "githubusercontent.com")
 
@@ -238,9 +243,9 @@ def _update_script(setup_path):
     return "\r\n".join([
         "@echo off",
         "chcp 65001 >nul",
-        'set "LOG=%s"' % log_path,
-        'set "SETUP=%s"' % setup_path,
-        'set "APP=%s"' % APP_DIR,
+        'set "LOG=%s"' % _cmd(log_path),
+        'set "SETUP=%s"' % _cmd(setup_path),
+        'set "APP=%s"' % _cmd(APP_DIR),
         'echo ==== %date% %time% update started >> "%LOG%"',
         "ping -n 3 127.0.0.1 >nul",
         'taskkill /F /T /IM LycRomanise.exe >> "%LOG%" 2>&1',
@@ -318,8 +323,8 @@ def _swap_script(new_path, target):
     return "\n".join([
         "@echo off",
         "chcp 65001 >nul",
-        'set "NEW=%s"' % new_path,
-        'set "OLD=%s"' % target,
+        'set "NEW=%s"' % _cmd(new_path),
+        'set "OLD=%s"' % _cmd(target),
         "set /a tries=0",
         ":retry",
         'move /y "%NEW%" "%OLD%" >nul 2>&1',

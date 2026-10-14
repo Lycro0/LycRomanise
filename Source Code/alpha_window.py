@@ -15,7 +15,7 @@ import math
 import os
 import sys
 
-log = logging.getLogger("spoti.alpha")
+log = logging.getLogger("lycro.alpha")
 
 try:
     from PIL import Image, ImageDraw, ImageFont

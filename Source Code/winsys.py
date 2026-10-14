@@ -1,4 +1,4 @@
-"""Windows integration for Spoti-Lyrics Overlay: running as its own console-less
+"""Windows integration for LycRomanise: running as its own console-less
 app, a single-instance guard, and the optional "start with Windows" entry.
 
 Everything here is a safe no-op on non-Windows systems, and every OS call can
@@ -10,13 +10,14 @@ import os
 import subprocess
 import sys
 
-log = logging.getLogger("spoti.winsys")
+log = logging.getLogger("lycro.winsys")
 
 from paths import APP_DIR as BASE_DIR
 LAUNCHER = os.path.join(BASE_DIR, "LyricsOverlay.pyw")
-MUTEX_NAME = "Local\\SpotiLyricsOverlay.SingleInstance"
+MUTEX_NAME = "Local\\LycRomanise.SingleInstance"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_VALUE = "SpotiLyricsOverlay"
+RUN_VALUE = "LycRomanise"
+LEGACY_RUN_VALUES = ("SpotiLyricsOverlay",)   # names used before v1.5.0
 
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -118,6 +119,43 @@ def _autostart_value(reg):
     with reg.OpenKey(reg.HKEY_CURRENT_USER, RUN_KEY, 0, reg.KEY_READ) as key:
         value, _ = reg.QueryValueEx(key, RUN_VALUE)
     return value
+
+
+def migrate_legacy_autostart(reg=None):
+    """Old versions registered "Start with Windows" under another name. If that entry exists, remove
+    it and (if the new entry isn't there yet) register the current one, so the choice carries over
+    and the app doesn't start twice. Returns True if anything was changed. Never raises."""
+    if not is_windows() and reg is None:
+        return False
+    try:
+        reg = reg or _winreg()
+        changed, was_on = False, False
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, RUN_KEY, 0, reg.KEY_READ | reg.KEY_SET_VALUE) as key:
+            for old in LEGACY_RUN_VALUES:
+                try:
+                    reg.QueryValueEx(key, old)
+                except OSError:
+                    continue
+                was_on = True
+                try:
+                    reg.DeleteValue(key, old)
+                    changed = True
+                except OSError:
+                    log.warning("couldn't remove the old start-with-Windows entry %r", old, exc_info=True)
+            try:
+                reg.QueryValueEx(key, RUN_VALUE)
+                has_new = True
+            except OSError:
+                has_new = False
+            if was_on and not has_new:
+                reg.SetValueEx(key, RUN_VALUE, 0, reg.REG_SZ, autostart_command())
+                changed = True
+        if changed:
+            log.info("replaced the old start-with-Windows entry with the current one")
+        return changed
+    except Exception:
+        log.exception("couldn't migrate the old start-with-Windows entry")
+        return False
 
 
 def refresh_autostart(reg=None):
@@ -351,14 +389,59 @@ def describe_window(tk_window_id, api=None):
 
 
 def open_url(url):
-    """Open a web page in the default browser."""
+    """Open a web page in the default browser. On Windows the shell is asked first (it always uses the
+    default browser, even from a windowless app); the webbrowser module is the fallback."""
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        return False
     try:
-        import webbrowser
-        if webbrowser.open(url, new=2):
-            return True
         if hasattr(os, "startfile"):
             os.startfile(url)      # noqa: S606
             return True
     except Exception:
         pass
-    return False
+    try:
+        import ctypes
+        if ctypes.windll.shell32.ShellExecuteW(None, "open", url, None, None, 1) > 32:
+            return True
+    except Exception:
+        pass
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url, new=2))
+    except Exception:
+        return False
+
+
+def start_hotkeys(bindings, callback):
+    """Global hotkeys on a background thread. bindings: {id: (modifiers, virtual_key)};
+    callback(id) is called from that thread, so it must only hand work to the Tk thread.
+    Returns True if the thread started. A key another program already owns is just skipped."""
+    if not is_windows():
+        return False
+    import ctypes
+    from ctypes import wintypes
+    import threading
+
+    def run():
+        try:
+            user32 = ctypes.windll.user32
+            registered = []
+            for hid, (mods, vk) in bindings.items():
+                if user32.RegisterHotKey(None, hid, mods | 0x4000, vk):      # 0x4000 = MOD_NOREPEAT
+                    registered.append(hid)
+                else:
+                    log.info("hotkey %s is already in use by another program", hid)
+            if not registered:
+                return
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == 0x0312 and msg.wParam in registered:     # WM_HOTKEY
+                    try:
+                        callback(int(msg.wParam))
+                    except Exception:
+                        log.exception("hotkey callback failed")
+        except Exception:
+            log.exception("hotkeys unavailable")
+
+    threading.Thread(target=run, daemon=True, name="hotkeys").start()
+    return True

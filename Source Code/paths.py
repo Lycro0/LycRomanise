@@ -38,3 +38,18 @@ if FROZEN and os.path.normcase(APP_DIR) != os.path.normcase(DATA_DIR):
                 shutil.move(_old, _new)
         except OSError:
             pass
+
+
+def write_json_atomic(path, data, **kwargs):
+    """Write JSON beside the file, then swap it in, so a crash mid-write can't leave a cut-off file."""
+    import json
+    import os
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, **kwargs)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, path)

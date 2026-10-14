@@ -1,4 +1,4 @@
-"""Logging + crash capture for Spoti-Lyrics Overlay.
+"""Logging + crash capture for LycRomanise.
 
 Everything the app prints, and every error it hits (including ones inside
 Tk callbacks and background threads), ends up in the logs/ folder next to the
@@ -6,7 +6,7 @@ app, so when something goes wrong there's a file to look at even though no
 console window is showing. Nothing is ever echoed to a console: the log file is
 the single destination for log records, print() and tracebacks.
 
-  logs/spoti-lyrics.log        the current log (rotates daily, 14 days kept)
+  logs/lycromanise.log        the current log (rotates daily, 14 days kept)
   logs/crash-native.log        hard crashes of the Python interpreter itself
 """
 
@@ -27,14 +27,14 @@ _reentry = threading.local()
 
 
 def _fallback_write(text):
-    """Last-resort log destination when logs/spoti-lyrics.log can't be written: a file in the
+    """Last-resort log destination when logs/lycromanise.log can't be written: a file in the
     temp folder (and next to the app if that fails). Never raises."""
     import tempfile
     import time
     line = "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text)
     for folder in (tempfile.gettempdir(), BASE_DIR, os.path.expanduser("~")):
         try:
-            with open(os.path.join(folder, "spoti-lyrics-fallback.log"), "a", encoding="utf-8") as fh:
+            with open(os.path.join(folder, "lycromanise-fallback.log"), "a", encoding="utf-8") as fh:
                 fh.write(line)
             return
         except Exception:
@@ -106,22 +106,39 @@ class _LogStream:
     def isatty(self):
         return False
 
+def _migrate_old_logs():
+    """Before v1.5.0 the log was called spoti-lyrics.log (plus dated copies): rename those to the new
+    name so the history stays together. Best effort; never raises."""
+    try:
+        for name in os.listdir(LOG_DIR):
+            if name.startswith("spoti-lyrics.log"):
+                new = "lycromanise.log" + name[len("spoti-lyrics.log"):]
+                src, dst = os.path.join(LOG_DIR, name), os.path.join(LOG_DIR, new)
+                if not os.path.exists(dst):
+                    os.replace(src, dst)
+                else:
+                    os.remove(src)
+    except Exception:
+        pass
+
+
 def setup():
     """Idempotent. Call once, as early as possible. File logging only."""
     global _done, _native_crash_file
     if _done:
-        return logging.getLogger("spoti")
+        return logging.getLogger("lycro")
     _done = True
 
-    logger = logging.getLogger("spoti")
+    logger = logging.getLogger("lycro")
     logger.setLevel(logging.INFO)
     logger.propagate = False   # never fall through to the root logger / a console
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
+        _migrate_old_logs()
         handler = _SafeFileHandler(
-            os.path.join(LOG_DIR, "spoti-lyrics.log"), when="midnight", backupCount=14, encoding="utf-8", delay=True
+            os.path.join(LOG_DIR, "lycromanise.log"), when="midnight", backupCount=14, encoding="utf-8", delay=True
         )
         handler.setFormatter(fmt)
         logger.addHandler(handler)
@@ -129,7 +146,7 @@ def setup():
         # read-only folder etc. - never write to a console; use the fallback file instead.
         _fallback_write("couldn't create the log folder %s: %s" % (LOG_DIR, exc))
         try:
-            fb = logging.FileHandler(os.path.join(__import__("tempfile").gettempdir(), "spoti-lyrics-fallback.log"),
+            fb = logging.FileHandler(os.path.join(__import__("tempfile").gettempdir(), "lycromanise-fallback.log"),
                                      encoding="utf-8")
             fb.setFormatter(fmt)
             logger.addHandler(fb)
@@ -138,8 +155,8 @@ def setup():
 
     # print() and uncaught-traceback output -> log file. Under pythonw these
     # streams are None, which would otherwise make any print() raise.
-    sys.stdout = _LogStream(logging.getLogger("spoti.stdout"), logging.INFO)
-    sys.stderr = _LogStream(logging.getLogger("spoti.stderr"), logging.ERROR)
+    sys.stdout = _LogStream(logging.getLogger("lycro.stdout"), logging.INFO)
+    sys.stderr = _LogStream(logging.getLogger("lycro.stderr"), logging.ERROR)
 
     def _excepthook(exc_type, exc, tb):
         logger.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
@@ -168,7 +185,7 @@ def setup():
 def install_tk_handler(root):
     """Errors inside Tk callbacks (after(), button clicks...) go to the log
     instead of vanishing into a console nobody can see."""
-    log = logging.getLogger("spoti.tk")
+    log = logging.getLogger("lycro.tk")
 
     def _report(exc_type, exc, tb):
         log.error("Error in Tk callback", exc_info=(exc_type, exc, tb))

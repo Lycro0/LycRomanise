@@ -1,4 +1,4 @@
-"""LycRomanise mobile view (v1.4.2).
+"""LycRomanise mobile view (v1.5.0).
 
 A tiny built-in web server so a phone or tablet on the same Wi-Fi can show the lyrics: open
 http://<this PC's address>:<port> in Safari / Chrome and the page draws the same karaoke line, next
@@ -7,18 +7,21 @@ line and artist/title card as the desktop strip. Nothing to install on the phone
 Design:
   * Pure standard library (http.server), read-only, GET only.
   * Off by default; only started when "Show lyrics on phones and tablets" is ticked in Settings.
-  * The app (Tk thread) calls publish(state) a few times a second; the page polls /state and animates
-    the karaoke fill between polls, so it stays smooth even though it is only updated ~8 times a second.
+  * The app (Tk thread) calls publish(state) a few times a second. The page listens to /events
+    (server-sent events: one open connection, a message only when something changed) and animates
+    the karaoke fill itself in between. Browsers without EventSource fall back to polling /state.
   * Only the lyrics currently on the strip are ever served (no files, no settings, no tokens).
 """
 
 import json
+import os
 import logging
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-log = logging.getLogger("spoti.mobile")
+log = logging.getLogger("lycro.mobile")
 
 DEFAULT_PORT = 8765
 
@@ -50,9 +53,45 @@ def mobile_url(port):
     return "http://%s:%d" % (ips[0] if ips else "<this-pc-address>", port)
 
 
+def _is_local_client(addr):
+    """True for a client on this PC or the local network (private / loopback / link-local ranges).
+    Anything else, such as an address reaching a Public network, is refused."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return False
+
+
+MAX_STREAMS = 8             # open /events connections served at once
+HEARTBEAT_S = 4.0           # a comment line this often keeps idle connections (and proxies) alive
+RESEND_S = 2.0              # a full state is pushed at least this often while the app is publishing
+DRIFT = 0.04                # ...or sooner if the karaoke fill is off from what the page would predict
+
+
+def worth_sending(old, new, dt):
+    """Should `new` be pushed to the pages that have `old` (sent `dt` seconds ago)? Yes if anything but
+    the karaoke fill changed, if the fill isn't where the page would have animated it to, or if the
+    last push is getting old."""
+    if old is None or dt >= RESEND_S:
+        return True
+    for k in (set(old) | set(new)) - {"fraction"}:
+        if old.get(k) != new.get(k):
+            return True
+    try:
+        predicted = float(old.get("fraction") or 0) + (float(old.get("rate") or 0) * dt if old.get("playing") else 0)
+        return abs(predicted - float(new.get("fraction") or 0)) > DRIFT
+    except (TypeError, ValueError):
+        return True
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "LycRomanise"
     protocol_version = "HTTP/1.0"
+    timeout = 10            # an idle or half-open connection can't hold a thread forever
 
     def log_message(self, fmt, *args):         # nothing goes to a console; keep the log file quiet
         pass
@@ -68,6 +107,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if not _is_local_client(self.client_address[0]):
+            try:
+                self._send(403, "Local network only", "text/plain; charset=utf-8")
+            except OSError:
+                pass
+            return
         try:
             if path in ("/", "/index.html", "/obs"):
                 page = PAGE.replace("__APP__", self.server.app_name)
@@ -77,6 +122,8 @@ class _Handler(BaseHTTPRequestHandler):
                     page = page.replace('<html lang="en">', '<html lang="en" class="obs" style="background:transparent">', 1)
                     page = page.replace("<body>", '<body style="background:transparent">', 1)
                 self._send(200, page, "text/html; charset=utf-8")
+            elif path == "/events":
+                self._stream()
             elif path == "/state":
                 self._send(200, json.dumps(self.server.snapshot(), ensure_ascii=False),
                            "application/json; charset=utf-8")
@@ -87,6 +134,42 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, OSError):
             pass                                # the phone went away mid-reply
 
+    def _stream(self):
+        """Server-sent events: the current state straight away, then every change, with a comment
+        line as a heartbeat when nothing changes. Ends when the page goes away or the server stops."""
+        srv = self.server
+        with srv.cond:
+            if srv.streams >= MAX_STREAMS:
+                busy = True
+            else:
+                busy = False
+                srv.streams += 1
+        if busy:
+            self._send(503, "Too many open pages", "text/plain; charset=utf-8")
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            seen = -1
+            while True:
+                with srv.cond:
+                    srv.cond.wait_for(lambda: srv.seq != seen or srv.stopping, timeout=HEARTBEAT_S)
+                    if srv.stopping:
+                        return
+                    changed = srv.seq != seen
+                    seen, payload = srv.seq, srv.sent_json
+                if changed:
+                    self.wfile.write(("data: %s\n\n" % payload).encode("utf-8"))
+                else:
+                    self.wfile.write(b": keep-alive\n\n")
+                self.wfile.flush()
+        finally:
+            with srv.cond:
+                srv.streams -= 1
+
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
@@ -94,7 +177,18 @@ class _Handler(BaseHTTPRequestHandler):
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Windows lets a second process share a port when SO_REUSEADDR is set; take it exclusively instead,
+    # so "port already in use" is reported. Elsewhere the normal reuse-after-restart behaviour stays.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            import socket
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except (AttributeError, OSError):
+                pass
+        super().server_bind()
 
     def handle_error(self, request, client_address):   # dropped connections are normal on Wi-Fi
         log.debug("mobile view: connection error from %s", client_address, exc_info=True)
@@ -128,7 +222,11 @@ class MobileServer:
             log.warning("mobile view could not start on port %s: %s", port, exc)
             return False
         httpd.lock = threading.Lock()
+        httpd.cond = threading.Condition(httpd.lock)     # wakes the /events streams on a new state
         httpd.state = {"kind": "none", "playing": False}
+        httpd.sent, httpd.sent_at = None, 0.0            # the last state pushed to /events streams
+        httpd.sent_json, httpd.seq = json.dumps(httpd.state), 0
+        httpd.streams, httpd.stopping = 0, False
         httpd.app_name = self.app_name
         self._httpd, self.port, self.error = httpd, int(port), None
         self._thread = threading.Thread(target=httpd.serve_forever, name="mobile-view", daemon=True)
@@ -140,14 +238,23 @@ class MobileServer:
         """Called from the app's UI thread with the dict the page should show."""
         httpd = self._httpd
         if httpd is not None:
-            with httpd.lock:
+            with httpd.cond:
                 httpd.state = state
+                now = time.monotonic()
+                if worth_sending(httpd.sent, state, now - httpd.sent_at):
+                    httpd.sent, httpd.sent_at = state, now
+                    httpd.sent_json = json.dumps(state, ensure_ascii=False)
+                    httpd.seq += 1
+                    httpd.cond.notify_all()
 
     def stop(self):
         httpd, self._httpd = self._httpd, None
         if httpd is None:
             return
         try:
+            with httpd.cond:
+                httpd.stopping = True
+                httpd.cond.notify_all()
             httpd.shutdown()
             httpd.server_close()
         except Exception:
@@ -289,7 +396,27 @@ PAGE = r"""<!doctype html>
     var keepAwake = function () { navigator.wakeLock.request('screen').catch(function () {}); };
     keepAwake(); document.addEventListener('visibilitychange', function () { if (!document.hidden) keepAwake(); });
   }
-  paintFill(); poll();
+  // Live updates: server-sent events when the browser has them, otherwise (or if they keep failing) polling.
+  var polling = false;
+  function startPolling() { if (!polling) { polling = true; poll(); } }
+  function startEvents() {
+    if (!('EventSource' in window)) { startPolling(); return; }
+    var es = new EventSource('/events'), errors = 0;
+    es.onmessage = function (e) {
+      try { var s = JSON.parse(e.data); } catch (x) { return; }
+      errors = 0; st = s; got = performance.now(); lastOk = got; apply(s);
+    };
+    es.onerror = function () {                    // the browser reconnects by itself; give up after a few misses
+      if (++errors >= 4 && es.readyState !== 1) { es.close(); startPolling(); }
+    };
+    setInterval(function () {                     // the server went quiet (the app froze or the Wi-Fi dropped)
+      if (!polling && performance.now() - lastOk > 7000) {
+        top.hidden = next.hidden = true; shownId = shownNext = null;
+        idle.style.display = ''; idle.textContent = 'Reconnecting\u2026';
+      }
+    }, 1500);
+  }
+  paintFill(); startEvents();
 })();
 </script>
 </body>

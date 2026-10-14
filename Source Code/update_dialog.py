@@ -42,6 +42,7 @@ class UpdateDialog:
         self._add("Update now", lambda: self._start(on_update), primary=True)
         self._add("Later", on_later)
         self._add("Skip this version", on_skip)
+        self._add("View on GitHub", on_open_page)
 
     def _add(self, text, command, primary=False):
         b = tk.Button(self.buttons, text=text, command=command, relief="flat", padx=14, pady=5,

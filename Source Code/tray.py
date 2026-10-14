@@ -13,7 +13,7 @@ import os
 
 import config
 
-log = logging.getLogger("spoti.tray")
+log = logging.getLogger("lycro.tray")
 
 try:
     import pystray
@@ -76,6 +76,11 @@ def menu_spec(is_locked, autostart_on, mobile_on=False, can_autostart=True):
         spec.append(("Start with Windows", "toggle_autostart", bool(autostart_on)))
     spec += [None, ("Mobile view (phones / tablets)", "toggle_mobile", bool(mobile_on)),
              ("Show mobile address / QR…", "mobile_info", None)]
+    spec += [None, ("Wrong lyrics? Pick another...", "wrong_lyrics", None),
+             ("Look up lyrics again", "lookup_again", None),
+             ("Lyrics earlier (Ctrl+Alt+Left)", "lyrics_earlier", None),
+             ("Lyrics later (Ctrl+Alt+Right)", "lyrics_later", None),
+             ("Reset timing for this song (Ctrl+Alt+Down)", "lyrics_timing_reset", None)]
     spec += [None, ("Check for updates", "check_update", None), ("Open logs folder", "open_logs", None), ("Quit", "quit", None)]
     return spec
 
@@ -123,7 +128,7 @@ class TrayIcon:
                         _IMPORT_ERROR)
             return False
         try:
-            self._icon = pystray.Icon("spoti-lyrics", load_icon_image(), self._title, menu=self._build_menu())
+            self._icon = pystray.Icon("lycromanise", load_icon_image(), self._title, menu=self._build_menu())
             self._icon.run_detached()
             log.info("tray icon started")
             return True

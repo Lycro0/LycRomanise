@@ -10,6 +10,7 @@ usable lyrics wins and the rest are not asked. LRCLIB is the only one today,
 a backup service can be added by writing one function and listing it there.
 """
 
+import atexit
 import json
 import logging
 import os
@@ -17,11 +18,13 @@ import re
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 
 import requests
 from concurrent.futures import Future
 
 import lyrics_check
+from paths import write_json_atomic
 from romanize.detect import detect_script
 
 LRCLIB_GET = "https://lrclib.net/api/get"
@@ -29,7 +32,7 @@ LRCLIB_SEARCH = "https://lrclib.net/api/search"
 # LRCLIB asks clients to identify themselves.
 LRCLIB_HEADERS = {"User-Agent": "LycRomanise (https://github.com/Lycro0/LycRomanise)"}
 
-log = logging.getLogger("spoti.lyrics")
+log = logging.getLogger("lycro.lyrics")
 
 # A search hit whose length is within this of the Spotify track is a safe match.
 MAX_DURATION_MISMATCH_MS = 6000
@@ -49,7 +52,7 @@ CACHE_PATH = os.path.join(_APP_DIR, "lyrics_cache.json")
 CACHE_MAX_ENTRIES = 300
 # Bump when the way lyrics are chosen changes: older cache entries are then ignored and
 # looked up again.
-CACHE_VERSION = 9   # 9: no language preference, exact-length entries skip the overrun check; 8: Korean-first tie-break (removed); 7: language-edition tie-break; 6: lookups made with a stale song length are dropped; 5: LRCLIB only, no word timing (v1.2.0); 4: cleaned-title retries; 3: language tags
+CACHE_VERSION = 10   # 10: instrumental markers, offset-aware parser; 9: no language preference, exact-length entries skip the overrun check; 8: Korean-first tie-break (removed); 7: language-edition tie-break; 6: lookups made with a stale song length are dropped; 5: LRCLIB only, no word timing (v1.2.0); 4: cleaned-title retries; 3: language tags
 
 # --- provider health -------------------------------------------------------------
 # A source that keeps failing at the network level (timeouts, HTTP 5xx/403/429) is
@@ -82,8 +85,7 @@ def _health_state():
 
 def _health_save():
     try:
-        with open(HEALTH_PATH, "w", encoding="utf-8") as f:
-            json.dump(_health, f)
+        write_json_atomic(HEALTH_PATH, _health)
     except OSError as exc:
         log.warning("couldn't write provider health file: %s", exc)
 
@@ -147,11 +149,24 @@ def _safe_json(resp):
     return data if isinstance(data, dict) else {}
 
 
+def _make_session():
+    """One shared connection pool: repeat lookups reuse the TLS connection instead of redoing the handshake."""
+    from requests.adapters import HTTPAdapter
+    sess = requests.Session()
+    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
+
+
+_session = _make_session()
+
+
 def _http(source, method, url, ok_statuses=(), **kwargs):
     """One HTTP call with the reason for any failure logged. Returns the
     response only when the status is 200, else None."""
     try:
-        resp = requests.request(method, url, timeout=TIMEOUT, **kwargs)
+        resp = _session.request(method, url, timeout=TIMEOUT, **kwargs)
     except requests.RequestException as exc:
         log.info("%s: request to %s failed: %s: %s", source, url.split("?")[0], type(exc).__name__, exc)
         _record_result(source, False)
@@ -241,9 +256,22 @@ def _tag_score(want_tag, cand_tag):
     return -8          # playing "(English Version)" but the candidate is untagged: mildly less likely
 
 
+_NO_SPLIT_ARTISTS = (re.compile(r"tyler,\s*the creator", re.I),)
+
+
 def _split_artists(artist_name):
-    parts = re.split(r",|&|;|/|\bfeat\.?\b|\bft\.?\b|\bwith\b|\bx\b", artist_name or "", flags=re.I)
+    """Split "A, B & C feat. D" into artists. Names that contain a separator themselves stay whole:
+    "AC/DC" (a slash without spaces), "X Japan" (x only counts between spaces), "Tyler, The Creator"."""
+    name = artist_name or ""
+    for rx in _NO_SPLIT_ARTISTS:
+        name = rx.sub(lambda m: m.group(0).replace(",", ""), name)
+    parts = re.split(r",|&|;|\s/\s|\bfeat\.?\b|\bft\.?\b|\bwith\b|(?<=[\w)])\s[x\u00d7]\s", name, flags=re.I)
     return [p for p in (_norm(p) for p in parts) if p]
+
+
+def _artist_match(w, h):
+    """Same artist: equal, or one contains the other when both are long enough not to match by accident."""
+    return w == h or (min(len(w), len(h)) >= 4 and (w in h or h in w))
 
 
 # --- which language edition of the lyrics ------------------------------------------------
@@ -292,7 +320,7 @@ def _pick_candidate(source, cands, title, artist, duration_ms, want_script=None)
         else:
             t = 0
         have = [_norm(a) for a in c["artists"]]
-        a = 1 if any(w and any(w in h or h in w for h in have if h) for w in want_artists) else 0
+        a = 1 if any(w and any(_artist_match(w, h) for h in have if h) for w in want_artists) else 0
         diff_s = abs(c["dur_ms"] - duration_ms) / 1000 if duration_ms and c["dur_ms"] else None
         is_loose = diff_s is not None and diff_s * 1000 > MAX_DURATION_MISMATCH_MS
         same_edition = language_tag(c["name"]) == want_tag and kind_tag(c["name"]) == want_kind
@@ -323,20 +351,49 @@ def _pick_candidate(source, cands, title, artist, duration_ms, want_script=None)
     return best
 
 
+INSTRUMENTAL_MARK = "\u266a"        # shown for an instrumental break (a long gap between two lyric lines)
+INSTRUMENTAL_MIN_GAP_S = 6.0         # shorter pauses just keep the previous line on screen
+_TS_RE = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]")
+_OFFSET_RE = re.compile(r"^\s*\[offset:\s*([+-]?\d+)\s*\]", re.I | re.M)
+_WORD_TAG_RE = re.compile(r"<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>")
+
+
 def parse_lrc(lrc_text: str):
-    """Parse LRC-format text into a sorted list of (timestamp_seconds, text)."""
-    lines = []
+    """Parse LRC text into a sorted list of (timestamp_seconds, text).
+
+    Handles several stamps on one line ([00:10.00][00:50.00]Chorus), stamps without a fraction,
+    word-timing tags (<00:12.30>) and the [offset:] header. A blank stamp (an instrumental
+    break) becomes an INSTRUMENTAL_MARK line when the break lasts INSTRUMENTAL_MIN_GAP_S or more;
+    shorter blanks, leading blanks and a trailing end marker are dropped."""
+    lrc_text = lrc_text or ""
+    m = _OFFSET_RE.search(lrc_text)
+    offset = int(m.group(1)) / 1000.0 if m else 0.0
+    items = []
     for raw in lrc_text.splitlines():
-        m = LRC_LINE_RE.match(raw)
-        if not m:
+        pos, stamps = 0, []
+        while True:
+            m = _TS_RE.match(raw, pos)
+            if not m:
+                break
+            minutes, seconds, frac = m.groups()
+            frac = (frac or "0").ljust(3, "0")[:3]
+            stamps.append(int(minutes) * 60 + int(seconds) + int(frac) / 1000)
+            pos = m.end()
+        if not stamps:
             continue
-        minutes, seconds, frac, text = m.groups()
-        frac = frac.ljust(3, "0")[:3]
-        ts = int(minutes) * 60 + int(seconds) + int(frac) / 1000
-        text = text.strip()
+        text = " ".join(_WORD_TAG_RE.sub("", raw[pos:]).split())
+        for ts in stamps:
+            items.append((max(0.0, ts - offset), text))
+    items.sort(key=lambda pair: pair[0])
+    lines = []
+    for k, (ts, text) in enumerate(items):
         if text:
             lines.append((ts, text))
-    lines.sort(key=lambda pair: pair[0])
+            continue
+        nxt = next((t for t, tx in items[k + 1:] if tx), None)
+        if (lines and lines[-1][1] != INSTRUMENTAL_MARK and nxt is not None
+                and nxt - ts >= INSTRUMENTAL_MIN_GAP_S):
+            lines.append((ts, INSTRUMENTAL_MARK))
     return lines
 
 
@@ -354,14 +411,23 @@ def _clean_title(title):
     t = unicodedata.normalize("NFKC", title or "")
     t = _CREDIT_BRACKET_RE.sub("", t)
     t = _REMASTER_SUFFIX_RE.sub("", t)
-    m = re.match(r"^(.*?[^\x00-\x24a-zA-Z\s].*?)\s*[\(\[]\s*[A-Za-z0-9 ,.'!?&-]+\s*[\)\]]\s*$", t)
+    m = re.match(r"^(.*?[^\x00-\u024f\u2000-\u206f].*?)\s*[\(\[]\s*[A-Za-z0-9 ,.'!?&-]+\s*[\)\]]\s*$", t)
     if m and not language_tag(t):
         t = m.group(1)
     return " ".join(t.split()) or (title or "")
 
 
 def _first_artist(artist_name):
-    return (re.split(r",|&|;|/|\bfeat\.?\b|\bft\.?\b", artist_name or "", flags=re.I)[0] or "").strip()
+    parts = _split_raw(artist_name)
+    return (parts[0] if parts else "").strip()
+
+
+def _split_raw(artist_name):
+    name = artist_name or ""
+    for rx in _NO_SPLIT_ARTISTS:
+        name = rx.sub(lambda m: m.group(0).replace(",", "\0"), name)
+    parts = re.split(r",|&|;|\s/\s|\bfeat\.?\b|\bft\.?\b", name, flags=re.I)
+    return [p.replace("\0", ",") for p in parts]
 
 
 _APOSTROPHE_LOOKALIKES = str.maketrans({c: "'" for c in "\u2032\u00b4\u0060\u2019\u2018\u02bc\u02b9\u0092\u2035\uff07"})
@@ -421,6 +487,8 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
     want = preferred_script(track_name, artist_name, album_name or "")
     fallback = None         # an exact hit in another language edition than the preferred one
     for i, (t, a) in enumerate(variants):
+        if i and time.monotonic() - started > LRCLIB_BUDGET_S:
+            break
         params = {"track_name": t, "artist_name": a}
         if album_name and i == 0:
             params["album_name"] = album_name
@@ -467,34 +535,226 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
 
 
 _cache_lock = threading.Lock()
+_cache = None            # OrderedDict, oldest first; loaded from disk once, then kept in memory
+_missing = None          # {key: epoch_s}: songs the lyrics site answered "not found" for
+_dirty = False
+_flush_timer = None
+FLUSH_DELAY_S = 3.0
+MISSING_PATH = os.path.join(_APP_DIR, "lyrics_missing.json")
+MISSING_TTL_S = 6 * 3600
+MISSING_MAX_ENTRIES = 500
 
 
-def _load_cache():
+def _read_json_dict(path):
     try:
-        with open(CACHE_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _save_cache(cache):
-    # Keep only the newest entries so the file can't grow forever.
-    while len(cache) > CACHE_MAX_ENTRIES:
-        cache.pop(next(iter(cache)))
-    tmp = CACHE_PATH + ".tmp"
+def _ensure_loaded():
+    """Load both caches from disk the first time they are needed (caller holds _cache_lock)."""
+    global _cache, _missing
+    if _cache is None:
+        _cache = OrderedDict(_read_json_dict(CACHE_PATH))
+    if _missing is None:
+        now = time.time()
+        _missing = {k: t for k, t in _read_json_dict(MISSING_PATH).items()
+                    if isinstance(t, (int, float)) and now - t < MISSING_TTL_S}
+
+
+def _schedule_flush():
+    """Write to disk a few seconds after the last change, not on every song (caller holds _cache_lock)."""
+    global _dirty, _flush_timer
+    _dirty = True
+    if _flush_timer is None:
+        _flush_timer = threading.Timer(FLUSH_DELAY_S, flush_cache)
+        _flush_timer.daemon = True
+        _flush_timer.start()
+
+
+def flush_cache():
+    """Write pending cache changes now. Also runs at exit, so nothing is lost on a normal close."""
+    global _dirty, _flush_timer
+    with _cache_lock:
+        _flush_timer = None
+        if not _dirty or _cache is None:
+            return
+        _dirty = False
+        while len(_cache) > CACHE_MAX_ENTRIES:
+            _cache.popitem(last=False)         # drop the least recently used
+        while len(_missing) > MISSING_MAX_ENTRIES:
+            _missing.pop(next(iter(_missing)))
+        cache_copy, missing_copy = dict(_cache), dict(_missing)
     try:
-        # Write beside the file, then swap: killing the app mid-write can't leave a cut-off cache.
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False)
-        os.replace(tmp, CACHE_PATH)
+        write_json_atomic(CACHE_PATH, cache_copy, ensure_ascii=False)
+        write_json_atomic(MISSING_PATH, missing_copy)
     except OSError as exc:
         log.warning("couldn't write lyrics cache: %s", exc)
+
+
+atexit.register(flush_cache)
+
+
+def _cache_lookup(key):
+    """(lyrics, plain) from memory, marking the entry as just used; None when absent or out of date."""
+    with _cache_lock:
+        _ensure_loaded()
+        hit = _cache.get(key)
+        if (isinstance(hit, dict) and hit.get("synced") and hit.get("v") == CACHE_VERSION
+                and not lyrics_check.is_placeholder(hit["synced"])):
+            _cache.move_to_end(key)
+            _schedule_flush()      # the new "last used" order is worth keeping
+            return [tuple(x) for x in hit["synced"]], hit.get("plain")
+    return None
+
+
+def _known_missing(key):
+    with _cache_lock:
+        _ensure_loaded()
+        t = _missing.get(key)
+        if t is None:
+            return False
+        if time.time() - t >= MISSING_TTL_S:
+            del _missing[key]
+            return False
+        return True
+
+
+def _remember_missing(key):
+    with _cache_lock:
+        _ensure_loaded()
+        _missing.pop(key, None)
+        _missing[key] = time.time()
+        _schedule_flush()
+
+
+def forget(track_name, artist_name, duration_ms=None):
+    """Drop what is stored for a song (its lyrics and any remembered 'not found'), so the next
+    fetch_lyrics call asks the lyrics site again."""
+    key = _cache_key(track_name, artist_name, duration_ms)
+    with _cache_lock:
+        _ensure_loaded()
+        _cache.pop(key, None)
+        _missing.pop(key, None)
+        _schedule_flush()
+
+
+def _cache_key(track_name, artist_name, duration_ms):
+    return f"{track_name}|{artist_name}|{round((duration_ms or 0) / 1000)}"
+
+
+# ----------------------------------------------------------------- local .lrc files --
+
+def lyrics_folders():
+    """Folders searched for your own .lrc files: <data folder>/lyrics, plus any folders listed under
+    "lyrics_folders" in config.json."""
+    folders = [os.path.join(_APP_DIR, "lyrics")]
+    try:
+        import config
+        folders += config.config_str_list("lyrics_folders")
+    except Exception:
+        pass
+    return folders
+
+
+def _loose(text):
+    """Like _norm() but keeps everything after a " - " (a file name is "Artist - Title")."""
+    text = _fold_latin_accents(unicodedata.normalize("NFKC", text or "").casefold())
+    text = re.sub(r"[^\w\s]", " ", text)
+    return " ".join(text.split())
+
+
+def _fetch_from_local(track_name, artist_name, album_name=None, duration_ms=None):
+    """Your own synced lyrics: a file called "Artist - Title.lrc" (or "Title - Artist.lrc", or just
+    "Title.lrc") in one of lyrics_folders(). No network; the first match wins."""
+    titles = {_loose(track_name), _loose(_clean_title(track_name))} - {""}
+    artists = ({_loose(a) for a in _split_raw(artist_name)} | {_loose(artist_name)}) - {""}
+    wanted = set(titles)
+    for t in titles:
+        for a in artists:
+            wanted.add("%s %s" % (a, t))
+            wanted.add("%s %s" % (t, a))
+    for folder in lyrics_folders():
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            stem, ext = os.path.splitext(name)
+            if ext.lower() != ".lrc" or _loose(stem) not in wanted:
+                continue
+            path = os.path.join(folder, name)
+            try:
+                with open(path, "rb") as fh:
+                    raw = fh.read(2_000_000)
+                text = raw.decode("utf-8-sig", errors="replace")
+            except OSError:
+                log.warning("couldn't read %s", path, exc_info=True)
+                continue
+            synced = parse_lrc(text)
+            if synced:
+                log.info("local lyrics file %s (%d lines)", name, len(synced))
+                return synced, None
+    return None, None
+
+
+# --------------------------------------------------------- "wrong lyrics?" picker --
+
+def search_alternatives(track_name, artist_name, duration_ms=None, limit=12):
+    """Other LRCLIB entries for the playing song, closest in length first, for the "Wrong lyrics?"
+    window: [{"id", "title", "artist", "album", "dur_s", "lines", "synced", "plain"}]. A site
+    outage gives []; the caller can tell that from "no entries" with outage_since()."""
+    clean, first = _clean_title(track_name), _first_artist(artist_name)
+    queries = [{"q": ("%s %s" % (ascii_quotes(clean), first)).strip()},
+               {"track_name": clean, "artist_name": first},
+               {"track_name": clean}]
+    seen = {}
+    started = time.monotonic()
+    for params in queries:
+        if seen and time.monotonic() - started > LRCLIB_BUDGET_S:
+            break
+        for c in _lrclib_search(params):
+            seen.setdefault(c["id"], c)
+    want = (duration_ms or 0) / 1000.0
+    out = []
+    for c in seen.values():
+        r = c["_r"]
+        synced = r.get("syncedLyrics") or ""
+        lines = len(parse_lrc(synced))
+        if not lines:
+            continue
+        out.append({"id": c["id"], "title": c["name"], "artist": (c["artists"] or [""])[0],
+                    "album": r.get("albumName") or "", "dur_s": c["dur_ms"] / 1000.0, "lines": lines,
+                    "synced": synced, "plain": r.get("plainLyrics")})
+    out.sort(key=lambda x: (abs(x["dur_s"] - want) if want else 0, -x["lines"]))
+    return out[:limit]
+
+
+def use_alternative(track_name, artist_name, duration_ms, alt):
+    """Make one entry from search_alternatives() the lyrics for this song (also for next time).
+    Returns (synced_lines, plain_text), or (None, None) if the entry has no usable lines."""
+    synced = parse_lrc(alt.get("synced") or "")
+    if not synced:
+        return None, None
+    plain = alt.get("plain")
+    key = _cache_key(track_name, artist_name, duration_ms)
+    with _cache_lock:
+        _ensure_loaded()
+        _cache.pop(key, None)
+        _cache[key] = {"v": CACHE_VERSION, "src": "picked", "synced": synced, "plain": plain}
+        _missing.pop(key, None)
+        _schedule_flush()
+    log.info("lyrics for %r set by hand to LRCLIB entry %s", track_name, alt.get("id"))
+    return synced, plain
 
 
 # Lookups in order of preference: (name, function(track, artist, album, duration_ms) ->
 # (synced_lines, plain_text)). The first one with usable lyrics wins.
 SOURCES = (
+    ("local", _fetch_from_local),
     ("lrclib", _fetch_from_lrclib),
 )
 
@@ -520,11 +780,13 @@ def fetch_lyrics(track_name, artist_name, album_name=None, duration_ms=None):
     if is_non_song(track_name, artist_name):
         log.info("not a song (%r - %r), no lyrics lookup", track_name, artist_name)
         return None, None
-    key = f"{track_name}|{artist_name}|{round((duration_ms or 0) / 1000)}"
-    hit = _load_cache().get(key)
-    if (isinstance(hit, dict) and hit.get("synced") and hit.get("v") == CACHE_VERSION
-            and not lyrics_check.is_placeholder(hit["synced"])):
-        return [tuple(x) for x in hit["synced"]], hit.get("plain")
+    key = _cache_key(track_name, artist_name, duration_ms)
+    hit = _cache_lookup(key)
+    if hit:
+        return hit
+    if _known_missing(key):
+        log.info("lyrics site had no lyrics for %r a while ago, not asking again yet", track_name)
+        return None, None
 
     # One lookup per song at a time: if a retry or re-lookup is already fetching this song, a
     # second request just waits for that result.
@@ -558,6 +820,7 @@ SOURCE_WAIT_S = 12.0
 
 def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
     started = time.monotonic()
+    asked_any = False
     for name, lookup in SOURCES:
         if source_paused(name):
             global _last_outage
@@ -565,6 +828,7 @@ def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
             log.info("source %s is paused after repeated failures, not asked for %r", name, track_name)
             continue
         _tl.match_dur_ms = None
+        asked_any = True
         try:
             synced, plain = lookup(track_name, artist_name, album_name, duration_ms)
         except Exception as exc:     # one broken source must never take the app down
@@ -586,10 +850,15 @@ def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
         log.info("lyrics for %r found via %s (%d lines) in %.1fs", track_name, name, len(synced),
                  time.monotonic() - started)
         with _cache_lock:
-            cache = _load_cache()
-            cache.pop(key, None)
-            cache[key] = {"v": CACHE_VERSION, "src": name, "synced": synced, "plain": plain}
-            _save_cache(cache)
+            _ensure_loaded()
+            _cache.pop(key, None)
+            _cache[key] = {"v": CACHE_VERSION, "src": name, "synced": synced, "plain": plain}
+            _missing.pop(key, None)
+            _schedule_flush()
         return synced, plain
     log.info("no synced lyrics found for %r - %s", track_name, artist_name)
+    # Remember a genuine "not found" (the site answered), but never an outage: a failed or
+    # skipped request says nothing about whether the song exists.
+    if asked_any and not outage_since(started):
+        _remember_missing(key)
     return None, None

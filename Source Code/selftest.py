@@ -9,7 +9,7 @@ import tkinter as tk
 
 import winsys
 
-log = logging.getLogger("spoti.app")
+log = logging.getLogger("lycro.app")
 
 
 def _lyrics_app_class():
@@ -40,7 +40,7 @@ def _selftest_report(text):
 def run_selftest(wait_s=6.0):
     """Build the real strip with a demo song, wait until it is mapped, log the window
     diagnostics (mapped, styles, colour key, on-screen lyric pixels on Windows) and
-    exit 0/1. The result goes to logs/spoti-lyrics.log and logs/selftest-result.txt.
+    exit 0/1. The result goes to logs/lycromanise.log and logs/selftest-result.txt.
     Run:  python app.py --selftest   (prints nothing; check those files).
     Uses real Tk, so unlike tests/ it can catch real-window bugs. The player is not read."""
     os.environ["SPOTI_SELFTEST"] = "1"
@@ -56,7 +56,7 @@ def run_selftest(wait_s=6.0):
         root = tk.Tk()
         application = LyricsApp(root)
         demo = [(0.0, "Selftest line one"), (4.0, "Selftest line two"), (8.0, "Selftest line three"), (12.0, "Selftest line four")]
-        application._handle_track("ok", {"id": "selftest", "name": "Selftest", "artist": "Spoti-Lyrics",
+        application._handle_track("ok", {"id": "selftest", "name": "Selftest", "artist": "LycRomanise",
                                          "album": "", "duration_ms": 60000, "progress_ms": 1000,
                                          "is_playing": True}, time.perf_counter())
         application._handle_lyrics("selftest", (demo, None, None))

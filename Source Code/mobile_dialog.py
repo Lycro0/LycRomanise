@@ -5,7 +5,7 @@ import tkinter as tk
 
 import mobile_server
 
-log = logging.getLogger("spoti.mobile")
+log = logging.getLogger("lycro.mobile")
 
 BG, FG, FG_DIM, ACCENT, FIELD_BG = "#0d0d0d", "#e8e8e8", "#9a9a9a", "#1db954", "#1a1a1a"
 

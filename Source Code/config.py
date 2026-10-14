@@ -9,7 +9,7 @@ import json
 import logging
 import os
 
-log = logging.getLogger("spoti.config")
+log = logging.getLogger("lycro.config")
 
 from paths import DATA_DIR as BASE_DIR
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -18,11 +18,9 @@ WINDOW_STATE_PATH = os.path.join(BASE_DIR, "window_state.json")
 from paths import RESOURCE_DIR as _RES_DIR
 ICON_PATH = os.path.join(_RES_DIR, "assets", "lyrics-overlay.ico")
 
+from paths import write_json_atomic
+
 # Appearance/behaviour settings live in appearance.json. Edit it by hand, or with the Settings window.
-TITLE_CARD_MARKER = "_title_card_off_v2"   # set once appearance.json was saved by this version
-NEXT_SIZE_MARKER = "_next_size_v1_4_2"      # set once the next-line size default (17 -> 19) was applied
-RESET_MARKER = "_defaults_reset_v1_3_2"    # set once every setting was reset to the defaults (v1.3.2)
-defaults_were_reset = False                # True during the run in which that one-time reset happened
 DEFAULT_APPEARANCE = {
     "karaoke_unsung_rgb": [255, 225, 77],   # #ffe14d yellow — not-yet-sung text
     "karaoke_sung_rgb": [255, 61, 154],     # #ff3d9a pink — already-sung text
@@ -47,6 +45,82 @@ DEFAULT_APPEARANCE = {
     "show_in_taskbar": False,               # True: the strip also has a taskbar button (so OBS and other tools can list it); applies live
 }
 
+# key -> (type, minimum, maximum) for numbers; colours are checked by _rgb / _hex
+_RANGES = {
+    "curr_font_size": (int, 8, 120), "next_font_size": (int, 8, 120),
+    "curr_font_min_size": (int, 6, 120), "next_font_min_size": (int, 6, 120),
+    "desktop_width": (int, 200, 4000), "desktop_height": (int, 60, 1500),
+    "lyric_offset_ms": (float, -30000, 30000), "outline_size": (float, 0, 4),
+    "spawn_y_percent": (float, 0, 90), "max_line_chars": (int, 0, 200), "mobile_port": (int, 1024, 65535),
+}
+_RGB_KEYS = ("karaoke_unsung_rgb", "karaoke_sung_rgb", "next_line_rgb", "outline_rgb")
+_BOOL_KEYS = ("show_title_card", "hide_lock_icon", "hide_desktop_strip", "mobile_enabled", "show_in_taskbar")
+
+
+def _rgb(value, default):
+    try:
+        rgb = [int(c) for c in value]
+        if len(rgb) >= 3 and all(0 <= c <= 255 for c in rgb[:3]):
+            return rgb[:3]
+    except (TypeError, ValueError):
+        pass
+    return list(default)
+
+
+def _hex(value, default):
+    if isinstance(value, str) and len(value) == 7 and value[0] == "#":
+        try:
+            int(value[1:], 16)
+            return value.lower()
+        except ValueError:
+            pass
+    return default
+
+
+def sanitize(settings):
+    """Return a complete, valid settings dict: unknown keys dropped, wrong types / out-of-range
+    values replaced by the default (numbers are clamped). Never raises."""
+    src = settings if isinstance(settings, dict) else {}
+    out = {}
+    for key, default in DEFAULT_APPEARANCE.items():
+        value = src.get(key, default)
+        if key in _RGB_KEYS:
+            out[key] = _rgb(value, default)
+        elif key == "desktop_bg":
+            out[key] = _hex(value, default)
+        elif key in _BOOL_KEYS:
+            out[key] = value if isinstance(value, bool) else default
+        elif key in _RANGES:
+            cast, lo, hi = _RANGES[key]
+            try:
+                if isinstance(value, bool):
+                    raise ValueError
+                num = cast(float(value)) if cast is int else float(value)
+                out[key] = max(lo, min(hi, num))
+            except (TypeError, ValueError, OverflowError):
+                out[key] = default
+        else:
+            out[key] = default
+    if out["next_font_min_size"] > out["next_font_size"]:
+        out["next_font_min_size"] = out["next_font_size"]
+    if out["curr_font_min_size"] > out["curr_font_size"]:
+        out["curr_font_min_size"] = out["curr_font_size"]
+    return out
+
+
+def config_str_list(key):
+    """A list of non-empty strings from config.json (e.g. "extra_players": ["tidal"]); [] if the
+    key is missing or isn't a list of strings. Never raises."""
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            val = data.get(key) if isinstance(data, dict) else None
+            if isinstance(val, list):
+                return [v.strip() for v in val if isinstance(v, str) and v.strip()]
+    except (OSError, ValueError):
+        pass
+    return []
 
 
 def check_updates_enabled():
@@ -63,52 +137,26 @@ def check_updates_enabled():
 
 
 def load_appearance():
-    """Return the appearance settings dict, defaults merged with whatever
-    appearance.json overrides. Never raises — a missing or corrupt file
-    just falls back to defaults, since cosmetic settings shouldn't be
-    able to stop the app from starting.
-    """
-    global defaults_were_reset
-    data = dict(DEFAULT_APPEARANCE)
-    if os.path.exists(APPEARANCE_PATH):
-        try:
+    """Return the (sanitized) appearance settings: defaults merged with appearance.json.
+    Never raises: a missing, corrupt or hand-edited-wrong file can't stop the app from starting."""
+    loaded = {}
+    try:
+        if os.path.exists(APPEARANCE_PATH):
             with open(APPEARANCE_PATH, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            if isinstance(loaded, dict) and not loaded.get(RESET_MARKER):
-                # First start of v1.3.2: everyone's settings go back to the (new) defaults, once.
-                log.info("first start of this version: resetting all settings to the defaults")
-                defaults_were_reset = True
-                try:
-                    save_appearance(data)
-                except OSError as exc:
-                    log.warning("couldn't save the reset settings: %s", exc)
-                return data
-            if isinstance(loaded, dict):
-                data.update(loaded)
-                if not loaded.get(NEXT_SIZE_MARKER):
-                    # v1.4.2: the next line is a little bigger. Only settings still on the old default move.
-                    if loaded.get("next_font_size") == 17:
-                        data["next_font_size"] = DEFAULT_APPEARANCE["next_font_size"]
-                    if loaded.get("next_font_min_size") == 11:
-                        data["next_font_min_size"] = DEFAULT_APPEARANCE["next_font_min_size"]
-                if not loaded.get(TITLE_CARD_MARKER):
-                    # One-time reset: the title card is now off for everyone.
-                    # Turning it back on in Settings sticks (save adds the marker).
-                    data["show_title_card"] = False
-        except (json.JSONDecodeError, OSError) as exc:
-            log.warning("ignoring unreadable appearance.json: %s", exc)
-    return data
+    except (ValueError, OSError) as exc:
+        log.warning("ignoring unreadable appearance.json: %s", exc)
+    try:
+        return sanitize(loaded)
+    except Exception as exc:
+        log.warning("settings could not be checked, using defaults: %s", exc)
+        return dict(DEFAULT_APPEARANCE)
+
 
 def save_appearance(data):
-    """Write out appearance.json. Only known keys are saved, so a typo'd
-    or stale key from an older version doesn't get carried forward
-    forever."""
-    clean = {k: data[k] for k in DEFAULT_APPEARANCE if k in data}
-    clean[TITLE_CARD_MARKER] = True
-    clean[RESET_MARKER] = True
-    clean[NEXT_SIZE_MARKER] = True
-    with open(APPEARANCE_PATH, "w", encoding="utf-8") as f:
-        json.dump(clean, f, indent=2)
+    """Write out appearance.json (sanitized, only known keys, atomically)."""
+    write_json_atomic(APPEARANCE_PATH, sanitize(data), indent=2)
+
 
 def update_appearance(**changes):
     """Load, change a few keys, save. Used by the tray/Settings so
@@ -119,6 +167,7 @@ def update_appearance(**changes):
         save_appearance(settings)
     except Exception as exc:  # cosmetics must never crash the app
         log.warning("couldn't save settings %s: %s", list(changes), exc)
+
 
 def reset_window_position():
     """Forget the saved strip position (keeps the lock state), so the next start uses the default place."""
@@ -138,7 +187,6 @@ def load_window_state():
 
 def save_window_state(state):
     try:
-        with open(WINDOW_STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f)
+        write_json_atomic(WINDOW_STATE_PATH, state)
     except OSError as exc:
         log.warning("couldn't save window position: %s", exc)
