@@ -76,20 +76,33 @@ _GREEK_DIGRAPHS = {
 }
 
 
+_DIAERESIS = "\u0308"
+
+
 def greek(text):
-    # Drop tone marks / diaeresis but keep the base letters.
+    # Drop tone marks but keep the base letters. A diaeresis (ϊ, ϋ) is remembered: it says the two
+    # vowels are read separately, so "αϊ" is a-i and not the digraph "αι" (e).
     decomposed = unicodedata.normalize("NFD", text)
-    src = "".join(c for c in decomposed if not unicodedata.combining(c))
+    chars, split_before = [], set()
+    for c in decomposed:
+        if c == _DIAERESIS:
+            if chars:
+                split_before.add(len(chars) - 1)      # the letter just added is a separate vowel
+        elif not unicodedata.combining(c):
+            chars.append(c)
+    src = "".join(chars)
     out, i = [], 0
     while i < len(src):
         pair = src[i:i + 2]
         low_pair = pair.lower()
-        if len(pair) == 2 and low_pair in _GREEK_DIGRAPHS:
+        if len(pair) == 2 and (i + 1) in split_before:
+            pass                                      # fall through: read the two letters one by one
+        elif len(pair) == 2 and low_pair in _GREEK_DIGRAPHS:
             out.append(_cased(pair[0], _GREEK_DIGRAPHS[low_pair]))
             i += 2
             continue
         # au / eu -> af/av, ef/ev depending on what follows
-        if len(pair) == 2 and low_pair in ("αυ", "ευ"):
+        if len(pair) == 2 and (i + 1) not in split_before and low_pair in ("αυ", "ευ"):
             nxt = src[i + 2:i + 3].lower()
             voiceless = nxt in ("", "κ", "ξ", "π", "σ", "ς", "τ", "φ", "χ", "ψ", "θ") or not nxt.isalpha()
             out.append(_cased(pair[0], ("a" if low_pair == "αυ" else "e") + ("f" if voiceless else "v")))

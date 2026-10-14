@@ -34,6 +34,9 @@ def _cmd(text):
     return str(text).replace("%", "%%")
 SKIP_PATH = os.path.join(DATA_DIR, "skipped_update.txt")
 _ALLOWED_HOSTS = ("github.com", "githubusercontent.com")
+MAX_DOWNLOAD_BYTES = 400 * 1024 * 1024     # the installer is tens of MB; anything near this is not it
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_verified = {}                             # downloaded file -> the SHA-256 it was checked against
 
 
 def _parse(v):
@@ -76,8 +79,9 @@ def check():
                 "sha256": digest.split(":", 1)[1].lower() if digest.lower().startswith("sha256:") else "",
             }
         log.info("update available: %s (running %s), files: %s", tag, __version__, ", ".join(assets) or "none")
-        return {"tag": tag, "url": data.get("html_url") or RELEASES_URL,
-                "notes": (data.get("body") or "").strip(), "assets": assets}
+        page = data.get("html_url")
+        return {"tag": tag, "url": page if _trusted_url(page) else RELEASES_URL,     # never open a non-GitHub address
+                "notes": (data.get("body") or "").strip()[:20000], "assets": assets}
     except Exception as exc:
         log.info("update check failed: %s", exc)
     return None
@@ -102,8 +106,8 @@ def can_self_update(release):
     if not (FROZEN and sys.platform == "win32"):
         return False
     _name, asset = _asset_for_this_copy(release)
-    if not asset or not _trusted_url(asset["url"]):
-        return False
+    if not asset or not _trusted_url(asset["url"]) or not _SHA256_RE.match(asset.get("sha256") or ""):
+        return False        # no published checksum: the file can't be verified, so open the release page instead
     return install_kind() == "installer" or os.access(APP_DIR, os.W_OK)
 
 
@@ -122,6 +126,10 @@ def download(release, progress=None):
     name, asset = _asset_for_this_copy(release)
     if not asset or not _trusted_url(asset["url"]):
         raise RuntimeError("This release has no %s to download." % name)
+    if not _SHA256_RE.match(asset.get("sha256") or ""):
+        raise RuntimeError("This release has no published checksum, so the download can't be verified.")
+    if asset["size"] > MAX_DOWNLOAD_BYTES:
+        raise RuntimeError("The update file is unexpectedly large.")
     os.makedirs(UPDATE_DIR, exist_ok=True)
     safe_tag = re.sub(r"[^0-9A-Za-z._-]", "_", release["tag"].lstrip("vV")) or "new"   # a tag can hold "/" etc.
     dest = os.path.join(UPDATE_DIR, "%s.%s" % (safe_tag, name))
@@ -136,22 +144,26 @@ def download(release, progress=None):
             if not _trusted_url(r.url):
                 raise RuntimeError("Download was redirected to an unexpected address.")
             total = int(r.headers.get("Content-Length") or asset["size"] or 0)
+            limit = min(MAX_DOWNLOAD_BYTES, asset["size"] or MAX_DOWNLOAD_BYTES)
             with open(part, "wb") as f:
                 for chunk in r.iter_content(chunk_size=64 * 1024):
                     if chunk:
+                        done += len(chunk)
+                        if done > limit:
+                            raise RuntimeError("Download was larger than expected.")
                         f.write(chunk)
                         sha.update(chunk)
-                        done += len(chunk)
                         if progress:
                             progress(done, total)
         if asset["size"] and done != asset["size"]:
             raise RuntimeError("Download was incomplete.")
-        if asset["sha256"] and sha.hexdigest() != asset["sha256"]:
+        if sha.hexdigest() != asset["sha256"]:
             raise RuntimeError("Downloaded file didn't match the published checksum.")
         with open(part, "rb") as f:
             if f.read(2) != b"MZ":
                 raise RuntimeError("Downloaded file isn't a Windows program.")
         os.replace(part, dest)
+        _verified[os.path.normcase(dest)] = asset["sha256"]
     except RuntimeError:
         _remove(part)
         raise
@@ -265,7 +277,7 @@ def _update_script(setup_path):
         "ping -n 3 127.0.0.1 >nul",
         ":install",
         'echo installing the new version >> "%LOG%"',
-        'start "" /wait "%SETUP%" ' + " ".join(_installer_args()),
+        'start "" /wait "%SETUP%" ' + _cmd(" ".join(_installer_args())),
         'echo installer exit code %errorlevel% >> "%LOG%"',
         "ping -n 5 127.0.0.1 >nul",
         'tasklist /FI "IMAGENAME eq LycRomanise.exe" | find /I "LycRomanise.exe" >nul',
@@ -297,11 +309,30 @@ def _run_installer(path):
     return True
 
 
+def _still_verified(path):
+    """True when the file is the one download() verified: hashed again now, because it sits in a
+    folder other programs of this user can write to and the installer may then run with admin rights."""
+    expected = _verified.get(os.path.normcase(path))
+    if not expected:
+        return False
+    sha = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                sha.update(chunk)
+    except OSError:
+        return False
+    return sha.hexdigest() == expected
+
+
 def apply(path, kind):
     """Start the install and return True; the caller must then quit the app straight away.
     installer: the Inno Setup installer runs with a progress bar only, then relaunches the app.
     portable: a tiny script waits for this exe to close, swaps the file and starts it again."""
     try:
+        if not _still_verified(path):
+            log.error("update file %s is not the one that was verified; not installing it", path)
+            return False
         if kind == "installer":
             if not _run_installer(path):
                 return False

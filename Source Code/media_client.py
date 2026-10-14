@@ -354,4 +354,9 @@ def spotify_window_title():
     for t in found:
         if " - " in t and t.strip().lower() not in NOT_A_SONG:
             return t
+    # No song title. Spotify also owns hidden helper windows with odd titles ("GDI+ Window (Spotify.exe)"):
+    # prefer the player's own "paused" title over one of those, or a paused song is mistaken for "nothing playing".
+    for t in found:
+        if t.strip().lower() in PAUSED_TITLES:
+            return t
     return found[0] if found else None

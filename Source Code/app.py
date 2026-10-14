@@ -242,6 +242,7 @@ class LyricsApp:
         self.player = None
         self._polling = False
         self._poll_busy = False
+        self._poll_gen = 0              # which poll worker owns _poll_busy (an old worker must not clear a newer one's)
         self._poll_started = 0.0
 
         # The strip itself always comes up, even when the player can't be read,
@@ -564,6 +565,10 @@ class LyricsApp:
         except Exception:
             log.exception("error while quitting for the update")
         finally:
+            try:
+                lyrics_provider.flush_cache()      # os._exit below skips the atexit hook that normally does this
+            except Exception:
+                log.exception("couldn't save the lyrics cache before the update")
             logging.shutdown()
             os._exit(0)
 
@@ -1023,9 +1028,10 @@ class LyricsApp:
                 return
             if not self._poll_busy:
                 self._poll_busy = True
+                self._poll_gen += 1
                 self._poll_started = now
                 threading.Thread(
-                    target=self._poll_worker, args=(self.current_track_id,),
+                    target=self._poll_worker, args=(self.current_track_id, self._poll_gen),
                     daemon=True, name="media-poll",
                 ).start()
             elif now - self._poll_started > 45:
@@ -1035,7 +1041,7 @@ class LyricsApp:
             self._poll_busy = False
             log.exception("unexpected poll error (recovering)")
 
-    def _poll_worker(self, known_track_id):
+    def _poll_worker(self, known_track_id, gen):
         try:
             player = self.player
             status, track = player.poll()
@@ -1045,7 +1051,8 @@ class LyricsApp:
             self._results.put(("track", status, track, received))
             if status == "ok" and track and track["id"] != known_track_id:
                 track = self._settle_length(player, track)
-                self._poll_busy = False   # done with the player: later polls may run while lyrics are fetched
+                if self._poll_gen == gen:
+                    self._poll_busy = False   # done with the player: later polls may run while lyrics are fetched
                 self._lookup_lengths = {track["id"]: track.get("duration_ms") or 0}
                 log.info("looking up lyrics for %r (track length %.0fs)", track["name"],
                          (track.get("duration_ms") or 0) / 1000.0)
@@ -1058,7 +1065,8 @@ class LyricsApp:
             log.exception("poll worker error (recovering)")
             self._results.put(("track", "error", None, time.perf_counter()))
         finally:
-            self._poll_busy = False
+            if self._poll_gen == gen:     # not if a newer worker has taken over meanwhile
+                self._poll_busy = False
 
     def _settle_length(self, player, track):
         """Right after a skip Windows can report the previous song's length for a moment, and a
@@ -1363,7 +1371,11 @@ class LyricsApp:
             synced, _plain = result
         if not synced:
             self.lyrics_state = "missing"
-            self.lyrics, self.segments = [], []
+            self.song_hint = None
+            self.lyrics, self.norm_lines = [], []
+            self.segments, self.seg_starts, self.line_infos = [], [], []
+            self.current_index = -1
+            self._anim_start_perf = None
             return
 
         self.lyrics = list(synced)

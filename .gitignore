@@ -9,3 +9,8 @@ provider_health.json
 build_tmp/
 *.exe
 lyrics_cache.json.tmp
+lyrics_missing.json
+song_offsets.json
+skipped_update.txt
+lyrics/
+*.tmp

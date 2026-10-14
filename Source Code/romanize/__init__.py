@@ -6,6 +6,8 @@ K-pop with English), so text is split into runs by script and each run is
 romanized by its own engine.
 """
 
+import re
+
 from .detect import char_class, detect_script
 
 __all__ = ["romanize_line", "needs_romanization", "detect_script", "char_class"]
@@ -83,4 +85,4 @@ def romanize_line(text, hint=None):
         if out and reading and out[-1] and not out[-1].endswith(" ") and not reading.startswith(" "):
             out.append(" ")
         out.append(reading)
-    return "".join(out).replace("  ", " ")
+    return re.sub(r" {2,}", " ", "".join(out))

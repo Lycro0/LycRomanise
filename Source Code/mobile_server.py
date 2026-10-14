@@ -1,4 +1,4 @@
-"""LycRomanise mobile view (v1.5.0).
+"""LycRomanise mobile view (v1.6.0).
 
 A tiny built-in web server so a phone or tablet on the same Wi-Fi can show the lyrics: open
 http://<this PC's address>:<port> in Safari / Chrome and the page draws the same karaoke line, next
@@ -13,7 +13,9 @@ Design:
   * Only the lyrics currently on the strip are ever served (no files, no settings, no tokens).
 """
 
+import html
 import json
+import math
 import os
 import logging
 import socket
@@ -66,6 +68,40 @@ def _is_local_client(addr):
         return False
 
 
+def _host_only(value):
+    """'Host' header -> bare lower-case host name or address ('' when it can't be read)."""
+    value = (value or "").strip().lower()
+    if value.startswith("["):                       # [::1]:8765
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def host_allowed(host_header, own_name=None, extra=()):
+    """DNS-rebinding guard. A web page on the internet can make a browser on this network send requests
+    to this server under the page's own name; those carry that name in the Host header. Only requests
+    addressed by IP address, "localhost", this PC's own name (or a name listed under
+    "mobile_allowed_hosts" in config.json) are answered."""
+    import ipaddress
+    host = _host_only(host_header)
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host.split("%")[0])
+        return True
+    except ValueError:
+        pass
+    own = (own_name or "").strip().lower()
+    # Only suffixes that never resolve on the internet: a name such as "mypc.evil.com" must not pass.
+    own_names = {own} | {own + sfx for sfx in LOCAL_SUFFIXES} if own else set()
+    return host == "localhost" or host.endswith(".localhost") or host in own_names or host in {h.lower() for h in extra}
+
+
+LOCAL_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".localdomain", ".fritz.box")
+
+# The page needs its own inline script and style and talks only to this server.
+CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
 MAX_STREAMS = 8             # open /events connections served at once
 HEARTBEAT_S = 4.0           # a comment line this often keeps idle connections (and proxies) alive
 RESEND_S = 2.0              # a full state is pushed at least this often while the app is publishing
@@ -88,6 +124,13 @@ def worth_sending(old, new, dt):
         return True
 
 
+def _finite(state):
+    """NaN / infinity are not valid JSON: the page would fail to read the state and freeze on the old line."""
+    if not any(isinstance(v, float) and not math.isfinite(v) for v in state.values()):
+        return state
+    return {k: (0.0 if isinstance(v, float) and not math.isfinite(v) else v) for k, v in state.items()}
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "LycRomanise"
     protocol_version = "HTTP/1.0"
@@ -102,20 +145,38 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(data)
 
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", CSP)
+
+    def _refuse_if_not_allowed(self):
+        """403 (and True) for a client outside the local network or a Host name this server wasn't
+        reached by on purpose (see host_allowed)."""
+        if not _is_local_client(self.client_address[0]):
+            reason = "Local network only"
+        elif not host_allowed(self.headers.get("Host"), self.server.own_name, self.server.extra_hosts):
+            reason = "Unknown host name: open this page by the PC's address"
+        else:
+            return False
+        try:
+            self._send(403, reason, "text/plain; charset=utf-8")
+        except OSError:
+            pass
+        return True
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if not _is_local_client(self.client_address[0]):
-            try:
-                self._send(403, "Local network only", "text/plain; charset=utf-8")
-            except OSError:
-                pass
+        if self._refuse_if_not_allowed():
             return
         try:
             if path in ("/", "/index.html", "/obs"):
-                page = PAGE.replace("__APP__", self.server.app_name)
+                page = PAGE.replace("__APP__", html.escape(self.server.app_name))
                 query = self.path.split("?", 1)[1] if "?" in self.path else ""
                 if path == "/obs" or any(p.split("=")[0] in ("obs", "transparent") for p in query.split("&")):
                     # transparent from the very first byte, no JavaScript needed to get rid of the background
@@ -152,6 +213,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")
+            self._security_headers()
             self.end_headers()
             seen = -1
             while True:
@@ -171,7 +233,11 @@ class _Handler(BaseHTTPRequestHandler):
                 srv.streams -= 1
 
     def do_HEAD(self):
+        if self._refuse_if_not_allowed():
+            return
         self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self._security_headers()
         self.end_headers()
 
 
@@ -217,7 +283,7 @@ class MobileServer:
         self.stop()
         try:
             httpd = _Server(("0.0.0.0", int(port)), _Handler)
-        except OSError as exc:
+        except (OSError, ValueError, OverflowError) as exc:
             self.error = "port %s: %s" % (port, exc)
             log.warning("mobile view could not start on port %s: %s", port, exc)
             return False
@@ -228,6 +294,12 @@ class MobileServer:
         httpd.sent_json, httpd.seq = json.dumps(httpd.state), 0
         httpd.streams, httpd.stopping = 0, False
         httpd.app_name = self.app_name
+        httpd.own_name = socket.gethostname()
+        try:
+            import config
+            httpd.extra_hosts = tuple(config.config_str_list("mobile_allowed_hosts"))
+        except Exception:
+            httpd.extra_hosts = ()
         self._httpd, self.port, self.error = httpd, int(port), None
         self._thread = threading.Thread(target=httpd.serve_forever, name="mobile-view", daemon=True)
         self._thread.start()
@@ -238,6 +310,7 @@ class MobileServer:
         """Called from the app's UI thread with the dict the page should show."""
         httpd = self._httpd
         if httpd is not None:
+            state = _finite(state)
             with httpd.cond:
                 httpd.state = state
                 now = time.monotonic()

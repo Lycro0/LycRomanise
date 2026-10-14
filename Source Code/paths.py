@@ -10,6 +10,7 @@ From source: both are the source folder, so development is unchanged.
 import os
 import shutil
 import sys
+import threading
 
 APP_NAME = "LycRomanise"
 FROZEN = bool(getattr(sys, "frozen", False))
@@ -40,16 +41,31 @@ if FROZEN and os.path.normcase(APP_DIR) != os.path.normcase(DATA_DIR):
             pass
 
 
+_write_lock = threading.Lock()
+
+
 def write_json_atomic(path, data, **kwargs):
-    """Write JSON beside the file, then swap it in, so a crash mid-write can't leave a cut-off file."""
+    """Write JSON beside the file, then swap it in, so a crash mid-write can't leave a cut-off file.
+
+    The temporary file has a name of its own and writes are serialised: the lyrics cache is saved by a
+    timer thread and again at exit, and two writers sharing one ".tmp" name used to lose a write."""
     import json
-    import os
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, **kwargs)
-        f.flush()
+    import tempfile
+    folder = os.path.dirname(os.path.abspath(path))
+    with _write_lock:
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=folder)
         try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp, path)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, **kwargs)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise

@@ -7,6 +7,7 @@ one data folder (see paths.py), so it doesn't matter which folder you launch the
 
 import json
 import logging
+import math
 import os
 
 log = logging.getLogger("lycro.config")
@@ -95,8 +96,10 @@ def sanitize(settings):
             try:
                 if isinstance(value, bool):
                     raise ValueError
-                num = cast(float(value)) if cast is int else float(value)
-                out[key] = max(lo, min(hi, num))
+                num = float(value)
+                if not math.isfinite(num):      # "nan" / "inf" in a hand-edited file
+                    raise ValueError
+                out[key] = max(lo, min(hi, cast(num)))
             except (TypeError, ValueError, OverflowError):
                 out[key] = default
         else:

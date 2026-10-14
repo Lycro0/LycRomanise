@@ -54,12 +54,12 @@ def has_console():
 
 
 def detach_from_console(spawn=subprocess.Popen, console=None):
-    if getattr(sys, "frozen", False):
-        return False   # the windowed .exe never has a console
     """If the app was started from a console (python app.py, run.bat, a
     terminal), start a fresh copy with pythonw and no console at all, and
     return True so the caller exits. The console can then be closed without
     touching the strip. Returns False when already console-less."""
+    if getattr(sys, "frozen", False):
+        return False   # the windowed .exe never has a console
     if not is_windows() or os.environ.get("SPOTI_NO_DETACH"):
         return False
     if not (has_console() if console is None else console):

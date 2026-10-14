@@ -59,7 +59,7 @@ def run_selftest(wait_s=6.0):
         application._handle_track("ok", {"id": "selftest", "name": "Selftest", "artist": "LycRomanise",
                                          "album": "", "duration_ms": 60000, "progress_ms": 1000,
                                          "is_playing": True}, time.perf_counter())
-        application._handle_lyrics("selftest", (demo, None, None))
+        application._handle_lyrics("selftest", (demo, None))
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline and not root.winfo_ismapped():
             root.update()

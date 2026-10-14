@@ -71,11 +71,19 @@ class LocalLrc(unittest.TestCase):
 
 class Picker(unittest.TestCase):
     def test_use_alternative_is_remembered(self):
-        alt = {"id": 7, "synced": "[00:01.00]a\n[00:03.00]b", "plain": "a b"}
-        self.assertEqual(lp.use_alternative("Pick Test", "Nobody", 180000, alt)[0], [(1.0, "a"), (3.0, "b")])
-        self.assertIsNotNone(lp._cache_lookup(lp._cache_key("Pick Test", "Nobody", 180000)))
-        self.assertEqual(lp.use_alternative("X", "Y", 1000, {"synced": ""}), (None, None))
-        lp.forget("Pick Test", "Nobody", 180000)
+        # Own temporary cache files: this test must never touch the real lyrics cache next to the app.
+        import tempfile
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        with mock.patch.object(lp, "CACHE_PATH", os.path.join(d, "c.json")), \
+                mock.patch.object(lp, "MISSING_PATH", os.path.join(d, "m.json")), \
+                mock.patch.object(lp, "_cache", None), mock.patch.object(lp, "_missing", None):
+            alt = {"id": 7, "synced": "[00:01.00]a\n[00:03.00]b", "plain": "a b"}
+            self.assertEqual(lp.use_alternative("Pick Test", "Nobody", 180000, alt)[0], [(1.0, "a"), (3.0, "b")])
+            self.assertIsNotNone(lp._cache_lookup(lp._cache_key("Pick Test", "Nobody", 180000)))
+            self.assertEqual(lp.use_alternative("X", "Y", 1000, {"synced": ""}), (None, None))
+            lp.forget("Pick Test", "Nobody", 180000)
+            lp.flush_cache()      # write to the temporary files now, not at exit
 
 
 class MobilePush(unittest.TestCase):

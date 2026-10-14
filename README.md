@@ -1,4 +1,4 @@
-# LycRomanise v1.5.0
+# LycRomanise v1.6.0
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -114,7 +114,8 @@ universal: LRCLIB is community-made, so some tracks have no synced lyrics. Lyric
 
 On startup the app checks the latest GitHub release of Lycro0/LycRomanise. If it is newer than
 `version.py`, a window offers **Update now / Later / Skip this version**. Update now downloads the
-file from the release, checks its size and SHA-256, installs it and restarts the app. Tray >
+file from the release, checks its size and SHA-256 (a release without a published checksum is never installed
+automatically: the release page opens instead), checks the file again just before it runs, installs it and restarts the app. Tray >
 **Check for updates** does the same on demand. Turn the check off with `"check_updates": false` in `config.json`.
 
 - An install made with `LycRomanise_Setup.exe` downloads and runs that file silently.
@@ -239,5 +240,10 @@ every candidate was rejected.
 
 - Logs (`logs/`) keep song titles and artists for 14 days, and `lyrics_cache.json` lists the songs you played. Don't share them publicly.
 - "Start with Windows" is off by default; turn it on in Settings if you want it.
-- The mobile page only answers devices on your local network (private address ranges); other addresses are refused.
+- The mobile page only answers devices on your local network (private address ranges); other addresses are refused. It
+  also only answers requests addressed by IP address, `localhost` or this PC's own name (`MYPC`, `MYPC.local`, `MYPC.lan`),
+  which stops a web page from reaching it through DNS rebinding. If you reach the PC by another name, list it under
+  `"mobile_allowed_hosts": ["name"]` in `config.json`. The page is sent with a strict Content-Security-Policy.
+- Lyrics from the internet are size-limited (reply size and time, number and length of lines) and checked before they
+  are cached or drawn; a damaged cache entry is dropped and looked up again.
 - Automatic update checks never open your browser. If this copy can't update itself, use tray > Check for updates.

@@ -13,7 +13,6 @@ back to the colour-key strip.
 import logging
 import math
 import os
-import sys
 
 log = logging.getLogger("lycro.alpha")
 

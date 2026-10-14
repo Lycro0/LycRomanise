@@ -1,7 +1,7 @@
 """Launcher: runs the lyrics strip as its own app with no console window.
 
 Double-click this file (Windows runs .pyw with pythonw.exe), or use
-LyricsOverlay.bat. Quit from the tray icon or the strip's right-click menu.
+LyricsOverlay.bat. Quit from the tray icon.
 """
 import os
 import sys

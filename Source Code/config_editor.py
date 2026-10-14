@@ -98,7 +98,10 @@ class ColorRow(tk.Frame):
         return "#%02x%02x%02x" % tuple(max(0, min(255, c)) for c in self.rgb)
 
     def _pick(self, _event=None):
-        rgb, hex_code = colorchooser.askcolor(color=self._hex(), title="Choose a color")
+        # parent = this settings window: without it the dialog belongs to the (hidden-style) strip and can
+        # open behind the always-on-top settings window
+        rgb, hex_code = colorchooser.askcolor(color=self._hex(), title="Choose a color",
+                                              parent=self.winfo_toplevel())
         if rgb is None:
             return
         self.rgb = [int(c) for c in rgb]
@@ -118,7 +121,7 @@ def _spinbox(parent, var, from_, to, increment=1, width=7):
 class SizeRow(tk.Frame):
     """One "<label>   [number]" row for an integer setting."""
 
-    def __init__(self, parent, label, initial_value, from_, to, on_change=None, unit=""):
+    def __init__(self, parent, label, initial_value, from_, to, on_change=None, unit="", step=1):
         super().__init__(parent, bg=CARD)
         self.var = tk.IntVar(value=initial_value)
         self.last_good = initial_value
@@ -128,7 +131,7 @@ class SizeRow(tk.Frame):
         _label(self, label).pack(side="left")
         if unit:
             _label(self, unit, size=9, color=FG_DIM).pack(side="right", padx=(6, 0))
-        _spinbox(self, self.var, from_, to).pack(side="right")
+        _spinbox(self, self.var, from_, to, step).pack(side="right")
 
     def get(self):
         """The value, clamped; half-typed text ("", "-") keeps the last good value."""
@@ -276,7 +279,7 @@ class ConfigEditor:
         self.width_row.pack(fill="x", pady=4)
         self.height_row.pack(fill="x", pady=4)
         card = self._card(page, "Lyrics timing and lines")
-        self.offset_row = SizeRow(card, "Lyric offset", st["lyric_offset_ms"], -3000, 3000, self._changed, "ms")
+        self.offset_row = SizeRow(card, "Lyric offset", st["lyric_offset_ms"], -3000, 3000, self._changed, "ms", step=100)
         self.offset_row.pack(fill="x", pady=4)
         _label(card, "Positive: lyrics appear earlier. Negative: later.", size=9, color=FG_DIM).pack(fill="x")
         self.split_row = SizeRow(card, "Split lines longer than", st["max_line_chars"], 0, 200, self._changed, "chars")
@@ -455,7 +458,12 @@ class ConfigEditor:
                 log.exception("applying settings failed")
 
     def _save(self):
-        self._apply_job = None
+        if self._apply_job is not None:       # a save is already queued (typing, "Reset to defaults"): this one covers it
+            try:
+                self.root.after_cancel(self._apply_job)
+            except Exception:
+                pass
+            self._apply_job = None
         try:
             # Merge into the current file so settings this window doesn't show
             # (spawn height, max line length...) survive a save.
