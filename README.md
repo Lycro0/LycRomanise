@@ -1,4 +1,4 @@
-# LycRomanise v1.6.0
+# LycRomanise v1.7.0
 
 A small Windows desktop overlay that shows synced, scrolling lyrics for whatever is playing on
 Spotify, Spotifast or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs (romaja,
@@ -60,8 +60,8 @@ Get `LycRomanise_Setup.exe` (installer) or `LycRomanise.exe` (portable) from the
   menu). LycRomanise then serves a small web page on your network: open `http://<this PC's address>:8765` in Safari or Chrome on
   a phone/tablet on the same Wi-Fi (or scan the QR code from "Show address / QR code…"). The page shows the same karaoke line,
   next line and title card with your colours and outline. Tap it once for full screen.
-  **OBS:** add a Browser source with `http://<this PC's address>:8765/obs` for a transparent, lyrics-only page (add `?scale=2` to
-  make the text bigger; the default is 1.5). Set the source size to match your scene. The page is transparent in OBS
+  **OBS:** add a Browser source with the same address, `http://<this PC's address>:8765`, for a transparent, lyrics-only page (the lyrics keep the same shape as the strip on your PC, 720x150 by default, and the whole strip is scaled to fit the
+  browser source, so any source size works and the lyrics are never squashed). The page is transparent in OBS
   (OBS browser sources are detected automatically, so even the plain address is see-through there).
 - **Hide the lyrics on this PC** (`hide_desktop_strip`): tick it in Settings when you only want the lyrics in the OBS
   browser source or on phones. The strip then draws nothing on your screen. It only applies while the Mobile view is on.
@@ -124,7 +124,7 @@ automatically: the release page opens instead), checks the file again just befor
   file just opens the release page.
 - "Skip this version" is remembered in `skipped_update.txt` until a newer release appears.
 
-**For each release:** bump `version.py`, `installer.iss` and `version_info.txt`, tag the release
+**For each release:** bump `version.py` here and `installer.iss` and `version_info.txt` in the `builder` folder, tag the release
 `v<version>`, and attach **both** `LycRomanise_Setup.exe` and `LycRomanise.exe` with exactly those names.
 
 ## Running from source
@@ -142,8 +142,8 @@ The `winrt-*` packages read the Windows media controls. If they are missing, or 
 session, the app falls back to the player's window title ("Artist - Song"), which has no length or
 position, so timing is counted from when the song was first seen and can drift after a seek.
 
-**Building the .exe:** `build_exe.bat` (PyInstaller, uses `LycRomanise.spec`) and `build_installer.bat`
-(Inno Setup, uses `installer.iss`). `make_icon.py` regenerates `assets/lyrics-overlay.ico`.
+**Building the .exe:** everything for that is in the `builder` folder next to this one: `build_exe.bat` (PyInstaller, uses
+`LycRomanise.spec`) and `build_installer.bat` (Inno Setup, uses `installer.iss`). `make_icon.py` there regenerates `assets/lyrics-overlay.ico`.
 
 ## Files and logs
 

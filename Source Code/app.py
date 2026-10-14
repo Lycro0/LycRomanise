@@ -81,15 +81,15 @@ DESKTOP_BG = "#000000"
 DESKTOP_NEXT_RGB = (255, 225, 77)
 DESKTOP_WIDTH = 720
 DESKTOP_HEIGHT = 150
-DESKTOP_CURR_SIZE = 26
-DESKTOP_NEXT_SIZE = 19
-DESKTOP_CURR_MIN_SIZE = 13
-DESKTOP_NEXT_MIN_SIZE = 12
+DESKTOP_CURR_SIZE = 25       # fixed (pt): the current line is always this size
+DESKTOP_NEXT_SIZE = 20       # fixed (pt): the next line is always this size
+DESKTOP_CURR_MIN_SIZE = DESKTOP_CURR_SIZE   # no shrinking: lines are split instead (see LINE_SPLIT_CHARS)
+DESKTOP_NEXT_MIN_SIZE = DESKTOP_NEXT_SIZE
+LINE_SPLIT_CHARS = 32        # a lyric line longer than this is split into two (or more) lines
 DESKTOP_TEXT_MARGIN = 40     # side margin (both sides combined) text must fit within
 DESKTOP_MAX_LINES = 2        # a line too wide for the strip wraps onto at most this many rows
-OUTLINE_SIZE = 1.5
+OUTLINE_SIZE = 1.5           # fixed text outline thickness (px)
 SPAWN_Y_PERCENT = 18
-MAX_LINE_CHARS = 0
 SHOW_TITLE_CARD = True
 HIDE_LOCK_ICON = True        # no padlock on the strip; lock and unlock from the tray menu only
 HIDE_DESKTOP_STRIP = False  # no lyrics on this PC (OBS browser source / phones only); only honoured while the mobile view is on
@@ -135,9 +135,8 @@ def _load_appearance():
         return
 
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
-    global DESKTOP_CURR_SIZE, DESKTOP_NEXT_SIZE, DESKTOP_CURR_MIN_SIZE, DESKTOP_NEXT_MIN_SIZE
-    global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, OUTLINE_SIZE, SPAWN_Y_PERCENT
-    global MAX_LINE_CHARS, SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR, MOBILE_ENABLED, MOBILE_PORT, OUTLINE_RGB, HIDE_DESKTOP_STRIP
+    global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, SPAWN_Y_PERCENT
+    global SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR, MOBILE_ENABLED, MOBILE_PORT, OUTLINE_RGB, HIDE_DESKTOP_STRIP
 
     def num(key, cast, default):
         try:
@@ -149,16 +148,10 @@ def _load_appearance():
     DESKTOP_NEXT_RGB = tuple(s["next_line_rgb"])
     DESKTOP_WIDTH = num("desktop_width", int, DESKTOP_WIDTH)
     DESKTOP_HEIGHT = num("desktop_height", int, DESKTOP_HEIGHT)
-    DESKTOP_CURR_SIZE = num("curr_font_size", int, DESKTOP_CURR_SIZE)
-    DESKTOP_NEXT_SIZE = num("next_font_size", int, DESKTOP_NEXT_SIZE)
-    DESKTOP_CURR_MIN_SIZE = num("curr_font_min_size", int, DESKTOP_CURR_MIN_SIZE)
-    DESKTOP_NEXT_MIN_SIZE = num("next_font_min_size", int, DESKTOP_NEXT_MIN_SIZE)
     KARAOKE_UNSUNG_RGB = tuple(s["karaoke_unsung_rgb"])
     KARAOKE_SUNG_RGB = tuple(s["karaoke_sung_rgb"])
     LYRIC_OFFSET_S = num("lyric_offset_ms", float, 0.0) / 1000.0
-    OUTLINE_SIZE = max(0.0, min(4.0, num("outline_size", float, OUTLINE_SIZE)))
     SPAWN_Y_PERCENT = max(0, min(90, num("spawn_y_percent", float, SPAWN_Y_PERCENT)))
-    MAX_LINE_CHARS = max(0, min(200, num("max_line_chars", int, 0)))
     SHOW_TITLE_CARD = bool(s.get("show_title_card", True))
     HIDE_LOCK_ICON = bool(s.get("hide_lock_icon", True))
     SHOW_IN_TASKBAR = bool(s.get("show_in_taskbar", False))
@@ -386,21 +379,17 @@ class LyricsApp:
             self.root.after(APPEARANCE_WATCH_MS, self._watch_appearance)
 
     def reload_appearance(self):
-        """Re-read appearance.json and apply it to the running strip: colours,
-        font sizes, strip size, outline, offset and title card, with
-        no restart."""
+        """Re-read appearance.json and apply it to the running strip right away: colours, strip size,
+        title card, OBS / phone page... no restart."""
         old_bg, old_w, old_h = DESKTOP_BG, DESKTOP_WIDTH, DESKTOP_HEIGHT
         old_taskbar = SHOW_IN_TASKBAR
+        self._appearance_mtime = self._appearance_stamp()   # this change is handled now; don't reload it again
         _load_appearance()
-        if SHOW_IN_TASKBAR != old_taskbar and self._alpha is not None:
-            self._alpha.set_taskbar(SHOW_IN_TASKBAR)
-        self._apply_mobile(announce=True)
-        self._refresh_tray()
-        self.desktop_curr_size = DESKTOP_CURR_SIZE
-        self.desktop_next_size = DESKTOP_NEXT_SIZE
-        self._desktop_top_font.configure(size=self.desktop_curr_size)
-        self._desktop_next_font.configure(size=self.desktop_next_size)
-        self._measure_font.configure(size=self.desktop_curr_size)
+        try:
+            if SHOW_IN_TASKBAR != old_taskbar and self._alpha is not None:
+                self._alpha.set_taskbar(SHOW_IN_TASKBAR)
+        except Exception:
+            log.exception("couldn't change the taskbar button")
         if (DESKTOP_WIDTH, DESKTOP_HEIGHT) != (old_w, old_h):
             self.root.geometry(f"{self.strip_w}x{self.strip_h}+{self.root.winfo_x()}+{self.root.winfo_y()}")
             self.desktop_canvas.configure(width=self.strip_w, height=self.strip_h)
@@ -411,6 +400,18 @@ class LyricsApp:
         self._rebuild_segments()
         self.title_text = self._make_title(self.track) if self.track else ""
         self._reposition_lock_icon()
+        # Colours are not part of the "did the frame change?" check, so force the next frame to be drawn
+        # and draw it now: the change is visible at once instead of up to a second later.
+        self._last_frame_sig = None
+        try:
+            self._redraw_desktop_canvas()
+        except Exception:
+            log.exception("redraw after a settings change failed")
+        try:
+            self._apply_mobile(announce=True)
+            self._refresh_tray()
+        except Exception:
+            log.exception("couldn't apply the phone / OBS settings")
         log.info("appearance settings applied live")
 
     # ---------------------------------------------------------- desktop UI --
@@ -674,7 +675,7 @@ class LyricsApp:
         """What the phone page should show right now (same scene as the strip)."""
         base = {"sung": _rgb_to_hex(KARAOKE_SUNG_RGB), "unsung": _rgb_to_hex(KARAOKE_UNSUNG_RGB),
                 "next_c": _rgb_to_hex(DESKTOP_NEXT_RGB), "outline": _rgb_to_hex(drawing.OUTLINE_RGB),
-                "outline_px": OUTLINE_SIZE}
+                "outline_px": OUTLINE_SIZE, "w": DESKTOP_WIDTH, "h": DESKTOP_HEIGHT}
         scene = self._scene()
         playing = bool(self._is_playing and self.current_track_id is not None)
         if scene is None:
@@ -820,6 +821,7 @@ class LyricsApp:
                     self._settings_window = None
             import config_editor
             win = tk.Toplevel(self.root)
+            win.withdraw()                     # stays hidden while it is built, then appears at its final size
             win.attributes("-topmost", True)   # the strip is topmost too; stay above it
             config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_reset_position=self.reset_position)
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(win))
@@ -1391,11 +1393,10 @@ class LyricsApp:
     # ---------------------------------------------------- segments / layout --
 
     def _max_chars(self):
-        """Lines are shown whole, exactly as the lyrics site times them (0 = never split). Only when
-        the user sets "Split lines longer than" in Settings are long lines cut into pieces; the
-        later pieces then start at a guessed time. A whole line too wide for the strip is wrapped
-        (and the font shrunk) when it is drawn."""
-        return MAX_LINE_CHARS if MAX_LINE_CHARS > 0 else 0
+        """A lyric line longer than LINE_SPLIT_CHARS (about 32 characters) is split into two lines at a
+        word boundary: the first part is the current line and the rest sits underneath as the next
+        line (it becomes the current line a moment later, at a guessed time)."""
+        return LINE_SPLIT_CHARS
 
     def _line_display(self, i):
         """Text of lyric line i as displayed (romanized when it needs it)."""
@@ -1728,7 +1729,7 @@ class LyricsApp:
         # ghost. The new line rises from the next-line slot into the top slot.
         top_lines = self._wrap_top_text(self._desktop_top_font, top_text, max_text_width)
         if len(top_lines) > 1:
-            line_height = self._px(DESKTOP_CURR_MIN_SIZE + 6)
+            line_height = self._px(DESKTOP_CURR_SIZE + 6)
             y = top_slot_y - (len(top_lines) - 1) * line_height / 2
             for line in top_lines:
                 self._draw_karaoke_line(canvas, line, self._desktop_top_font, center_x, y, fraction, outline)
@@ -1807,6 +1808,8 @@ def main():
     if not winsys.acquire_single_instance():
         log.info("another copy is already running; exiting")
         return
+    if config.reset_settings_once():     # v1.7.0: everyone starts again from the default settings
+        _load_appearance()
     winsys.migrate_legacy_autostart()   # v1.5.0: the old entry had a different name
     winsys.refresh_autostart()          # keep the Run entry pointing at where the app is now
     if winsys.env_flag("SPOTI_DEBUG_NO_DPI"):

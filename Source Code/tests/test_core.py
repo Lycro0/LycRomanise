@@ -42,9 +42,9 @@ class Korean(unittest.TestCase):
 
 class Settings(unittest.TestCase):
     def test_sanitize_bad_values(self):
-        s = config.sanitize({"karaoke_sung_rgb": 5, "curr_font_size": "x", "desktop_width": 99999, "desktop_bg": "red"})
+        s = config.sanitize({"karaoke_sung_rgb": 5, "mobile_port": "x", "desktop_width": 99999, "desktop_bg": "red"})
         self.assertEqual(s["karaoke_sung_rgb"], config.DEFAULT_APPEARANCE["karaoke_sung_rgb"])
-        self.assertEqual(s["curr_font_size"], config.DEFAULT_APPEARANCE["curr_font_size"])
+        self.assertEqual(s["mobile_port"], config.DEFAULT_APPEARANCE["mobile_port"])
         self.assertEqual(s["desktop_width"], 4000)
         self.assertEqual(s["desktop_bg"], "#000000")
 

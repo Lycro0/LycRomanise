@@ -27,17 +27,11 @@ DEFAULT_APPEARANCE = {
     "karaoke_sung_rgb": [255, 61, 154],     # #ff3d9a pink — already-sung text
     "next_line_rgb": [255, 225, 77],        # #ffe14d — next-line preview
     "desktop_bg": "#000000",
-    "curr_font_size": 26,
-    "next_font_size": 19,
-    "curr_font_min_size": 13,
-    "next_font_min_size": 12,
     "desktop_width": 720,
     "desktop_height": 150,
     "lyric_offset_ms": 0,                   # +ve = lyrics appear earlier, -ve = later
-    "outline_size": 1.5,                    # text border, px (0 = none)
     "outline_rgb": [0, 0, 0],               # text border colour (also used for the title card and next line)
     "spawn_y_percent": 18,                  # first-launch height of the strip, % down the screen
-    "max_line_chars": 0,                    # split lines longer than this many characters (0 = never: lines stay whole, as timed by the lyrics site)
     "show_title_card": True,                # "Artist - Song" card (about 10 s, or until the first lyric starts)
     "hide_lock_icon": True,                 # True: no padlock on the strip; lock/unlock from the tray menu only
     "hide_desktop_strip": False,            # True: no lyrics on this PC (they are only served to the OBS / phone page); needs mobile_enabled
@@ -48,11 +42,9 @@ DEFAULT_APPEARANCE = {
 
 # key -> (type, minimum, maximum) for numbers; colours are checked by _rgb / _hex
 _RANGES = {
-    "curr_font_size": (int, 8, 120), "next_font_size": (int, 8, 120),
-    "curr_font_min_size": (int, 6, 120), "next_font_min_size": (int, 6, 120),
     "desktop_width": (int, 200, 4000), "desktop_height": (int, 60, 1500),
-    "lyric_offset_ms": (float, -30000, 30000), "outline_size": (float, 0, 4),
-    "spawn_y_percent": (float, 0, 90), "max_line_chars": (int, 0, 200), "mobile_port": (int, 1024, 65535),
+    "lyric_offset_ms": (float, -30000, 30000),
+    "spawn_y_percent": (float, 0, 90), "mobile_port": (int, 1024, 65535),
 }
 _RGB_KEYS = ("karaoke_unsung_rgb", "karaoke_sung_rgb", "next_line_rgb", "outline_rgb")
 _BOOL_KEYS = ("show_title_card", "hide_lock_icon", "hide_desktop_strip", "mobile_enabled", "show_in_taskbar")
@@ -104,10 +96,6 @@ def sanitize(settings):
                 out[key] = default
         else:
             out[key] = default
-    if out["next_font_min_size"] > out["next_font_size"]:
-        out["next_font_min_size"] = out["next_font_size"]
-    if out["curr_font_min_size"] > out["curr_font_size"]:
-        out["curr_font_min_size"] = out["curr_font_size"]
     return out
 
 
@@ -170,6 +158,28 @@ def update_appearance(**changes):
         save_appearance(settings)
     except Exception as exc:  # cosmetics must never crash the app
         log.warning("couldn't save settings %s: %s", list(changes), exc)
+
+
+# One-time reset of everybody's appearance settings to the defaults (v1.7.0 removed several settings and
+# changed the look). A marker file in the data folder makes sure it only ever happens once.
+SETTINGS_RESET_MARKER = os.path.join(BASE_DIR, "settings_reset_1.7.0.flag")
+
+
+def reset_settings_once():
+    """First start of v1.7.0 (or the first start after installing it): put every appearance setting back to
+    its default. Returns True if the reset happened now. The lyrics position, login and cache are kept.
+    Never raises."""
+    try:
+        if os.path.exists(SETTINGS_RESET_MARKER):
+            return False
+        save_appearance(dict(DEFAULT_APPEARANCE))
+        with open(SETTINGS_RESET_MARKER, "w", encoding="utf-8") as f:
+            f.write("appearance reset to defaults by v1.7.0\n")
+        log.info("appearance settings reset to the defaults (v1.7.0)")
+        return True
+    except Exception as exc:
+        log.warning("couldn't reset the settings: %s", exc)
+        return False
 
 
 def reset_window_position():

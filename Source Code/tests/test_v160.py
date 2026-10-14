@@ -52,15 +52,15 @@ class AtomicWriteTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_nan_and_infinity_fall_back_to_defaults(self):
-        out = config.sanitize({"lyric_offset_ms": float("nan"), "outline_size": float("inf"),
+        out = config.sanitize({"lyric_offset_ms": float("nan"), "desktop_width": float("inf"),
                                "spawn_y_percent": float("-inf")})
         self.assertEqual(out["lyric_offset_ms"], config.DEFAULT_APPEARANCE["lyric_offset_ms"])
-        self.assertEqual(out["outline_size"], config.DEFAULT_APPEARANCE["outline_size"])
+        self.assertEqual(out["desktop_width"], config.DEFAULT_APPEARANCE["desktop_width"])
         self.assertEqual(out["spawn_y_percent"], config.DEFAULT_APPEARANCE["spawn_y_percent"])
 
     def test_ordinary_values_still_clamp(self):
-        out = config.sanitize({"curr_font_size": 9999, "mobile_port": "80", "lyric_offset_ms": "250"})
-        self.assertEqual((out["curr_font_size"], out["mobile_port"], out["lyric_offset_ms"]), (120, 1024, 250.0))
+        out = config.sanitize({"desktop_height": 9999, "mobile_port": "80", "lyric_offset_ms": "250"})
+        self.assertEqual((out["desktop_height"], out["mobile_port"], out["lyric_offset_ms"]), (1500, 1024, 250.0))
 
 
 class LrcHardeningTests(unittest.TestCase):
@@ -244,12 +244,12 @@ class UpdaterTests(unittest.TestCase):
 
 
 class VersionTests(unittest.TestCase):
-    def test_version_is_1_6_0_everywhere(self):
-        self.assertEqual(version.__version__, "1.6.0")
-        here = os.path.join(os.path.dirname(__file__), "..")
-        for name, needle in (("installer.iss", '"1.6.0"'), ("version_info.txt", "1.6.0.0")):
+    def test_version_is_current_everywhere(self):
+        self.assertEqual(version.__version__, "1.7.0")
+        here = os.path.join(os.path.dirname(__file__), "..", "..", "builder")
+        for name, needle in (("installer.iss", '"1.7.0"'), ("version_info.txt", "1.7.0.0")):
             path = os.path.join(here, name)
-            if os.path.exists(path):          # not part of the "Cleaned source code" folder
+            if os.path.exists(path):          # these live in the "builder" folder
                 with open(path, encoding="utf-8") as f:
                     self.assertIn(needle, f.read(), name)
 

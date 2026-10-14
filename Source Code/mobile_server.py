@@ -1,4 +1,4 @@
-"""LycRomanise mobile view (v1.6.0).
+"""LycRomanise mobile view (v1.7.0).
 
 A tiny built-in web server so a phone or tablet on the same Wi-Fi can show the lyrics: open
 http://<this PC's address>:<port> in Safari / Chrome and the page draws the same karaoke line, next
@@ -344,7 +344,6 @@ PAGE = r"""<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
-<meta name="theme-color" content="#000000">
 <title>__APP__</title>
 <script>
   /* OBS mode as early as possible: OBS Browser sources always have window.obsstudio, so even the plain address
@@ -358,9 +357,9 @@ PAGE = r"""<!doctype html>
   })();
 </script>
 <style>
-  :root { --sung:#ff3d9a; --unsung:#ffe14d; --next:#ffe14d; --ol:#000; --olw:3px; --olwn:2px; }
+  :root { --sung:#ff3d9a; --unsung:#ffe14d; --next:#ffe14d; --ol:#000; --olw:3px; --olwn:2px; --dw:720; --dh:150; --s:1; }
   [hidden] { display:none !important; }
-  html, body { margin:0; height:100%; background:#000; overflow:hidden; -webkit-user-select:none; user-select:none;
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden; -webkit-user-select:none; user-select:none;
                -webkit-tap-highlight-color: transparent; }
   body { font-family: -apple-system, "SF Pro Text", "Segoe UI", Roboto, "Noto Sans", Arial, sans-serif; font-weight:700; }
   #stage { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -370,10 +369,23 @@ PAGE = r"""<!doctype html>
   .ln::before { content: attr(data-t); position:absolute; left:0; right:0; top:0; z-index:0; color:var(--ol);
                 -webkit-text-stroke: var(--w) var(--ol); pointer-events:none; }
   .ln > span { position:relative; z-index:1; }
-  html.obs, html.obs body, html.obs #stage { background: transparent !important; background-color: transparent !important; }
+  /* always see-through (OBS, phone or any browser), with no address options needed */
+  html, body, #stage { background: transparent !important; background-color: transparent !important; }
   html.obs #idle { display:none !important; }
-  #top { font-size: calc(clamp(24px, 7.2vw, 48px) * var(--k, 1)); --w: var(--olw); }
-  #next { font-size: calc(clamp(18px, 5.2vw, 34px) * var(--k, 1)); margin-top: 3.5vh; --w: var(--olwn); }
+  #top { font-size: clamp(24px, 7.2vw, 48px); --w: var(--olw); }
+  #next { font-size: clamp(18px, 5.2vw, 34px); margin-top: 3.5vh; --w: var(--olwn); }
+  /* OBS: the lyrics are laid out on a fixed "strip" (the same size and shape as the one on the PC, 720x150 by
+     default) and that whole strip is scaled to fit the browser source. The lyrics never get squashed or
+     re-wrapped; only the strip as a whole grows or shrinks, keeping its aspect ratio. */
+  .slot { display:contents; }
+  html.obs #stage { inset:auto; left:50%; top:50%; width:calc(var(--dw) * 1px); height:calc(var(--dh) * 1px); padding:0;
+                    display:block; transform: translate(-50%, -50%) scale(var(--s, 1)); transform-origin:center center; }
+  html.obs .slot { display:flex; position:absolute; left:0; right:0; height:0; justify-content:center; align-items:center; }
+  html.obs #topslot { top: 46px; }
+  html.obs #nextslot { top: calc(var(--dh) * 1px - 28px); }
+  html.obs .ln { max-width: calc(var(--dw) * 1px - 40px); line-height:1.25; }
+  html.obs #top { font-size: 33.33px; }      /* 25 pt, as on the PC */
+  html.obs #next { font-size: 26.67px; margin-top:0; }   /* 20 pt */
   #top > span { color:transparent; -webkit-text-fill-color:transparent; -webkit-background-clip:text; background-clip:text; }
   #next > span { color: var(--next); }
   .rise { animation: rise .28s cubic-bezier(.2,.7,.2,1); }
@@ -384,20 +396,29 @@ PAGE = r"""<!doctype html>
 </head>
 <body>
 <div id="stage">
-  <div id="top" class="ln" hidden><span></span></div>
-  <div id="next" class="ln" hidden><span></span></div>
+  <div id="topslot" class="slot"><div id="top" class="ln" hidden><span></span></div></div>
+  <div id="nextslot" class="slot"><div id="next" class="ln" hidden><span></span></div></div>
 </div>
 <div id="idle">__APP__ &middot; connecting&hellip;</div>
 <script>
 (function () {
   var top = document.getElementById('top'), next = document.getElementById('next'), idle = document.getElementById('idle');
   var topSpan = top.firstElementChild, nextSpan = next.firstElementChild;
-  // OBS mode: open /obs (or ?obs=1). Transparent background, no status text; ?scale=2 makes the text bigger.
+  // OBS mode: open /obs (or ?obs=1). Transparent background, no status text. The strip keeps the shape of the
+  // one on the PC and is scaled up or down to fit whatever size the browser source has.
   var OBS = !!window.__OBS;
+  var dw = 720, dh = 150;
+  function fitStrip() {
+    if (!OBS) return;
+    var sc = Math.min(window.innerWidth / dw, window.innerHeight / dh);
+    var root = document.documentElement.style;
+    root.setProperty('--dw', dw); root.setProperty('--dh', dh);
+    root.setProperty('--s', String(isFinite(sc) && sc > 0 ? sc : 1));
+  }
   if (OBS) {
     document.documentElement.classList.add('obs');
-    var m = /[?&]scale=([0-9.]+)/.exec(location.search);
-    document.documentElement.style.setProperty('--k', String(Math.max(0.3, Math.min(6, m ? parseFloat(m[1]) : 1.5))));
+    fitStrip();
+    window.addEventListener('resize', fitStrip);
   }
   var st = null, got = 0, shownId = null, shownNext = null, lastOk = 0, lastTop = '';
 
@@ -409,6 +430,9 @@ PAGE = r"""<!doctype html>
     if (s.unsung)  root.setProperty('--unsung', s.unsung);
     if (s.next_c)  root.setProperty('--next', s.next_c);
     if (s.outline) root.setProperty('--ol', s.outline);
+    if (OBS && typeof s.w === 'number' && typeof s.h === 'number' && s.w > 0 && s.h > 0 && (s.w !== dw || s.h !== dh)) {
+      dw = s.w; dh = s.h; fitStrip();
+    }
     if (typeof s.outline_px === 'number') {
       root.setProperty('--olw', (s.outline_px * 2) + 'px');
       root.setProperty('--olwn', (Math.min(s.outline_px, 1) * 2) + 'px');

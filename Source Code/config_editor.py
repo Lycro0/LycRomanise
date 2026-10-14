@@ -22,7 +22,6 @@ import winsys
 
 log = logging.getLogger("lycro.settings")
 
-APPLY_DELAY_MS = 350   # wait for typing/spinning to settle before saving
 
 BG = "#15141f"          # window
 CARD = "#1e1d2b"        # a group of settings
@@ -45,33 +44,13 @@ def _set_window_icon(win):
         log.warning("couldn't set the window icon", exc_info=True)
 
 
-class Toggle(tk.Canvas):
-    """An on/off switch bound to a tk.BooleanVar. Click (or Space) flips it."""
-    W, H = 42, 22
+class Toggle(tk.Checkbutton):
+    """A tick box bound to a tk.BooleanVar. Ticking or unticking it applies the change immediately."""
 
     def __init__(self, parent, var, command=None, bg=CARD):
-        super().__init__(parent, width=self.W, height=self.H, bg=bg, highlightthickness=0, bd=0,
-                         cursor="hand2", takefocus=1)
-        self.var, self.command = var, command
-        self.bind("<Button-1>", self._flip)
-        self.bind("<space>", self._flip)
-        var.trace_add("write", lambda *_: self._draw())
-        self._draw()
-
-    def _flip(self, _event=None):
-        self.var.set(not self.var.get())
-        if self.command:
-            self.command()
-
-    def _draw(self):
-        on = bool(self.var.get())
-        self.delete("all")
-        r = self.H // 2
-        self.create_oval(0, 0, self.H, self.H, fill=ACCENT if on else FIELD, outline="")
-        self.create_oval(self.W - self.H, 0, self.W, self.H, fill=ACCENT if on else FIELD, outline="")
-        self.create_rectangle(r, 0, self.W - r, self.H, fill=ACCENT if on else FIELD, outline="")
-        x = self.W - r - 1 if on else r + 1
-        self.create_oval(x - r + 3, 3, x + r - 3, self.H - 3, fill="#ffffff", outline="")
+        super().__init__(parent, variable=var, command=command, bg=bg, activebackground=bg,
+                         selectcolor=FIELD, fg=FG, activeforeground=FG, highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=1, padx=0, pady=0)
 
 
 def _label(parent, text, size=10, color=FG, bold=False, bg=CARD, **kw):
@@ -149,7 +128,6 @@ class ConfigEditor:
         self.root = root
         self.on_reset_position = on_reset_position
         self.on_apply = on_apply     # optional: called right after each save (the app also watches the file)
-        self._apply_job = None
         self._built = False
         self._pages = {}
         self._tab_buttons = {}
@@ -178,6 +156,24 @@ class ConfigEditor:
         self._fit_window()
         self._show_tab("look")
         self._draw_preview()
+        self._present()
+
+    def _present(self):
+        """Work out the window's final size while it is still hidden, centre it, then show it: it opens
+        at its normal size instead of starting small and growing."""
+        try:
+            self.root.update_idletasks()
+            w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            h = min(h, sh - 80)
+            self.root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 3)))
+            self.root.update_idletasks()
+        except Exception:
+            log.warning("couldn't place the settings window", exc_info=True)
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ pieces --
 
@@ -185,7 +181,7 @@ class ConfigEditor:
         head = tk.Frame(self.root, bg=BG)
         head.pack(fill="x", padx=18, pady=(16, 8))
         tk.Label(head, text="Settings", fg=FG, bg=BG, font=(FONT, 16, "bold")).pack(anchor="w")
-        tk.Label(head, text="Changes are saved and applied to the strip as you make them.",
+        tk.Label(head, text="Every change is saved and applied to the strip the moment you make it.",
                  fg=FG_DIM, bg=BG, font=(FONT, 9)).pack(anchor="w", pady=(0, 10))
         self.preview_canvas = tk.Canvas(head, height=50, bg="#000000", highlightthickness=1,
                                         highlightbackground=FIELD)
@@ -230,7 +226,9 @@ class ConfigEditor:
         Toggle(row, var, self._changed).pack(side="right", padx=(12, 0))
         left = tk.Frame(row, bg=CARD)
         left.pack(side="left", fill="x", expand=True)
-        _label(left, text, wraplength=340).pack(fill="x")
+        title = _label(left, text, wraplength=340)
+        title.pack(fill="x")
+        title.bind("<Button-1>", lambda _e, v=var: (v.set(not v.get()), self._changed()))   # the text ticks it too
         if hint:
             _label(left, hint, size=9, color=FG_DIM, wraplength=340).pack(fill="x")
         return row
@@ -252,41 +250,21 @@ class ConfigEditor:
         for row in (self.unsung_row, self.sung_row, self.next_row, self.outline_row):
             row.pack(fill="x", pady=4)
             row.swatch.bind("<Button-1>", lambda _e: self._draw_preview(), add="+")
-        card = self._card(page, "Outline")
-        self.outline_var = tk.DoubleVar(value=float(st["outline_size"]))
-        self.outline_var.trace_add("write", lambda *_: self._changed())
-        row = tk.Frame(card, bg=CARD)
-        row.pack(fill="x", pady=4)
-        _label(row, "Outline thickness").pack(side="left")
-        _label(row, "px", size=9, color=FG_DIM).pack(side="right", padx=(6, 0))
-        _spinbox(row, self.outline_var, 0, 4, 0.5).pack(side="right")
         card = self._card(page, "Title card")
         self.title_var = tk.BooleanVar(value=bool(st["show_title_card"]))
         self._toggle(card, "Show 'Artist - Song' first", self.title_var,
                      "For about 10 seconds, or until the first lyric starts.")
 
     def _build_text(self, page, st):
-        card = self._card(page, "Font sizes")
-        self.curr_size_row = SizeRow(card, "Current line", st["curr_font_size"], 10, 60, self._changed, "pt")
-        self.next_size_row = SizeRow(card, "Next line", st["next_font_size"], 6, 40, self._changed, "pt")
-        self.curr_min_row = SizeRow(card, "Current line, smallest", st["curr_font_min_size"], 6, 40, self._changed, "pt")
-        self.next_min_row = SizeRow(card, "Next line, smallest", st["next_font_min_size"], 4, 30, self._changed, "pt")
-        for row in (self.curr_size_row, self.next_size_row, self.curr_min_row, self.next_min_row):
-            row.pack(fill="x", pady=4)
         card = self._card(page, "Strip size")
         self.width_row = SizeRow(card, "Width", st["desktop_width"], 300, 2000, self._changed, "px")
         self.height_row = SizeRow(card, "Height", st["desktop_height"], 80, 500, self._changed, "px")
         self.width_row.pack(fill="x", pady=4)
         self.height_row.pack(fill="x", pady=4)
-        card = self._card(page, "Lyrics timing and lines")
+        card = self._card(page, "Lyrics timing")
         self.offset_row = SizeRow(card, "Lyric offset", st["lyric_offset_ms"], -3000, 3000, self._changed, "ms", step=100)
         self.offset_row.pack(fill="x", pady=4)
         _label(card, "Positive: lyrics appear earlier. Negative: later.", size=9, color=FG_DIM).pack(fill="x")
-        self.split_row = SizeRow(card, "Split lines longer than", st["max_line_chars"], 0, 200, self._changed, "chars")
-        self.split_row.pack(fill="x", pady=(10, 4))
-        _label(card, "0 = never split: each line stays whole and keeps the lyrics site's timing. A higher number "
-                     "cuts longer lines into pieces; the later pieces' timing is a guess.",
-               size=9, color=FG_DIM, wraplength=420).pack(fill="x")
 
     def _build_behaviour(self, page, st):
         card = self._card(page, "Strip")
@@ -387,18 +365,12 @@ class ConfigEditor:
             "karaoke_unsung_rgb": self.unsung_row.rgb,
             "karaoke_sung_rgb": self.sung_row.rgb,
             "next_line_rgb": self.next_row.rgb,
-            "curr_font_size": self.curr_size_row.get(),
-            "next_font_size": self.next_size_row.get(),
-            "curr_font_min_size": self.curr_min_row.get(),
-            "next_font_min_size": self.next_min_row.get(),
             "desktop_width": self.width_row.get(),
             "desktop_height": self.height_row.get(),
             "lyric_offset_ms": self.offset_row.get(),
-            "max_line_chars": self.split_row.get(),
             "show_title_card": bool(self.title_var.get()),
             "hide_lock_icon": bool(self.hide_lock_var.get()),
             "show_in_taskbar": bool(self.taskbar_var.get()),
-            "outline_size": self._outline(),
             "outline_rgb": self.outline_row.rgb,
             "hide_desktop_strip": bool(self.hide_strip_var.get()),
             "mobile_enabled": bool(self.mobile_var.get()),
@@ -419,27 +391,15 @@ class ConfigEditor:
 
     def _show_mobile(self):
         import mobile_dialog
-        if self._apply_job is not None:       # make sure the latest port is saved/applied first
-            self._save()
+        self._save()                          # make sure the latest port is saved/applied first
         mobile_dialog.show(self.root, self.port_row.get(), bool(self.mobile_var.get()))
 
-    def _outline(self):
-        try:
-            return max(0.0, min(4.0, float(self.outline_var.get())))
-        except (tk.TclError, ValueError):
-            return config.DEFAULT_APPEARANCE["outline_size"]
-
     def _changed(self, *_):
-        """Something was edited: refresh the preview and (debounced) save+apply."""
+        """Something was edited: refresh the preview, then save and apply it to the strip straight away."""
         if not getattr(self, "_built", False):
             return      # initial values being filled in while the window is built: nothing to save
         self._draw_preview()
-        if self._apply_job is not None:
-            try:
-                self.root.after_cancel(self._apply_job)
-            except Exception:
-                pass
-        self._apply_job = self.root.after(APPLY_DELAY_MS, self._save)
+        self._save()
 
     def _autostart_changed(self):
         if getattr(self, "_autostart_busy", False):
@@ -458,12 +418,6 @@ class ConfigEditor:
                 log.exception("applying settings failed")
 
     def _save(self):
-        if self._apply_job is not None:       # a save is already queued (typing, "Reset to defaults"): this one covers it
-            try:
-                self.root.after_cancel(self._apply_job)
-            except Exception:
-                pass
-            self._apply_job = None
         try:
             # Merge into the current file so settings this window doesn't show
             # (spawn height, max line length...) survive a save.
@@ -481,8 +435,6 @@ class ConfigEditor:
                 log.exception("applying settings failed")
 
     def _done(self):
-        if self._apply_job is not None:
-            self._save()
         self.root.destroy()
 
     def _reset(self):
@@ -498,18 +450,12 @@ class ConfigEditor:
         for row in (self.unsung_row, self.sung_row, self.next_row, self.outline_row):
             row.swatch.configure(bg=row._hex())
             row.hex_label.configure(text=row._hex())
-        self.curr_size_row.var.set(defaults["curr_font_size"])
-        self.next_size_row.var.set(defaults["next_font_size"])
-        self.curr_min_row.var.set(defaults["curr_font_min_size"])
-        self.next_min_row.var.set(defaults["next_font_min_size"])
         self.width_row.var.set(defaults["desktop_width"])
         self.height_row.var.set(defaults["desktop_height"])
         self.offset_row.var.set(defaults["lyric_offset_ms"])
-        self.split_row.var.set(defaults["max_line_chars"])
         self.title_var.set(defaults["show_title_card"])
         self.hide_lock_var.set(defaults["hide_lock_icon"])
         self.taskbar_var.set(defaults["show_in_taskbar"])
-        self.outline_var.set(defaults["outline_size"])
         self.mobile_var.set(defaults["mobile_enabled"])
         self.hide_strip_var.set(defaults["hide_desktop_strip"])
         self.port_row.var.set(defaults["mobile_port"])
@@ -520,6 +466,7 @@ class ConfigEditor:
 def main():
     winsys.enable_dpi_awareness()      # before the first Tk window, so text is crisp when scaled
     root = tk.Tk()
+    root.withdraw()                    # shown by ConfigEditor once it has its final size
     try:
         import applog
         applog.setup()
