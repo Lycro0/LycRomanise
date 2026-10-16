@@ -37,6 +37,7 @@ from media_client import MediaClient
 import updater
 import update_dialog
 import mobile_server
+import nowplaying
 
 log = logging.getLogger("lycro.app")
 
@@ -92,6 +93,9 @@ OUTLINE_SIZE = 1.5           # fixed text outline thickness (px)
 SPAWN_Y_PERCENT = 18
 SHOW_TITLE_CARD = True
 HIDE_LOCK_ICON = True        # no padlock on the strip; lock and unlock from the tray menu only
+NOW_PLAYING_FILE = True     # keep LycRomanise.txt (the playing song) up to date for OBS
+NOW_PLAYING_FORMAT = nowplaying.DEFAULT_FORMAT
+NOW_PLAYING_CLEAR_S = 10.0  # nothing playing for this long: LycRomanise.txt is emptied (skips and ads don't flicker it)
 HIDE_DESKTOP_STRIP = False  # no lyrics on this PC (OBS browser source / phones only); only honoured while the mobile view is on
 MOBILE_ENABLED = False       # built-in web page for phones/tablets (Settings -> Mobile view)
 MOBILE_PORT = mobile_server.DEFAULT_PORT
@@ -137,6 +141,7 @@ def _load_appearance():
     global DESKTOP_BG, DESKTOP_NEXT_RGB, DESKTOP_WIDTH, DESKTOP_HEIGHT
     global KARAOKE_UNSUNG_RGB, KARAOKE_SUNG_RGB, LYRIC_OFFSET_S, SPAWN_Y_PERCENT
     global SHOW_TITLE_CARD, HIDE_LOCK_ICON, SHOW_IN_TASKBAR, MOBILE_ENABLED, MOBILE_PORT, OUTLINE_RGB, HIDE_DESKTOP_STRIP
+    global NOW_PLAYING_FILE, NOW_PLAYING_FORMAT
 
     def num(key, cast, default):
         try:
@@ -157,6 +162,8 @@ def _load_appearance():
     SHOW_IN_TASKBAR = bool(s.get("show_in_taskbar", False))
     MOBILE_ENABLED = bool(s.get("mobile_enabled", False))
     HIDE_DESKTOP_STRIP = bool(s.get("hide_desktop_strip", False))
+    NOW_PLAYING_FILE = bool(s.get("now_playing_file", True))
+    NOW_PLAYING_FORMAT = s.get("now_playing_format", nowplaying.DEFAULT_FORMAT)
     MOBILE_PORT = max(1024, min(65535, num("mobile_port", int, mobile_server.DEFAULT_PORT)))
     try:
         OUTLINE_RGB = tuple(int(c) for c in s.get("outline_rgb", OUTLINE_RGB))[:3]
@@ -231,6 +238,8 @@ class LyricsApp:
         self._tray_state = (False, False, False)
         self._mobile = mobile_server.MobileServer(APP_NAME)
         self._mobile_next_publish = 0.0
+        self._np = nowplaying.NowPlayingFile(config.now_playing_path)   # LycRomanise.txt for OBS
+        self._np_clear_pending = False
         self._tray_tried = False
         self.player = None
         self._polling = False
@@ -249,6 +258,8 @@ class LyricsApp:
 
         self._apply_mobile()
         self._connect_player()
+        log.info("now playing text file for OBS: %s (%s)", self._np.path, "on" if NOW_PLAYING_FILE else "off")
+        self._sync_now_playing(grace=True)
         self._update_release = None
         self._update_win = None
         if not os.environ.get("SPOTI_SELFTEST"):
@@ -382,7 +393,7 @@ class LyricsApp:
         """Re-read appearance.json and apply it to the running strip right away: colours, strip size,
         title card, OBS / phone page... no restart."""
         old_bg, old_w, old_h = DESKTOP_BG, DESKTOP_WIDTH, DESKTOP_HEIGHT
-        old_taskbar = SHOW_IN_TASKBAR
+        old_taskbar, old_np = SHOW_IN_TASKBAR, NOW_PLAYING_FILE
         self._appearance_mtime = self._appearance_stamp()   # this change is handled now; don't reload it again
         _load_appearance()
         try:
@@ -399,6 +410,13 @@ class LyricsApp:
             self._enable_transparency()
         self._rebuild_segments()
         self.title_text = self._make_title(self.track) if self.track else ""
+        try:
+            if old_np and not NOW_PLAYING_FILE:
+                self._np.write("")                 # switched off: don't leave an old song in the file
+            else:
+                self._sync_now_playing()           # switched on, or the format changed
+        except Exception:
+            log.exception("couldn't update the now playing file")
         self._reposition_lock_icon()
         # Colours are not part of the "did the frame change?" check, so force the next frame to be drawn
         # and draw it now: the change is visible at once instead of up to a second later.
@@ -552,6 +570,10 @@ class LyricsApp:
     def _quit(self):
         self._save_window_state()
         log.info("quitting")
+        try:
+            self._np.write("")                     # nothing is playing through LycRomanise any more
+        except Exception:
+            pass
         self._mobile.stop()
         if self.tray is not None:
             self.tray.stop()
@@ -588,11 +610,7 @@ class LyricsApp:
                 "mobile_info": self._show_mobile_info,
                 "about": lambda: winsys.open_url(RELEASES_URL),
                 "check_update": self.check_for_update,
-                "lookup_again": self._lookup_again,
                 "wrong_lyrics": self._wrong_lyrics,
-                "lyrics_earlier": lambda: self._nudge_song_offset(-100),
-                "lyrics_later": lambda: self._nudge_song_offset(+100),
-                "lyrics_timing_reset": lambda: self._nudge_song_offset(None),
                 "open_logs": self._open_logs_folder,
                 "quit": self._quit,
             },
@@ -634,9 +652,9 @@ class LyricsApp:
                 return
             if self._mobile.start(MOBILE_PORT):
                 if announce:
-                    self._set_banner("Mobile view: " + mobile_server.mobile_url(MOBILE_PORT), 8.0)
+                    self._set_banner("Web view: " + mobile_server.mobile_url(MOBILE_PORT), 8.0)
             else:
-                self._set_notice("Mobile view couldn't start (%s) - try another port in Settings"
+                self._set_notice("Web view couldn't start (%s) - try another port in Settings"
                                  % (self._mobile.error or "see the log"), "error", seconds=10)
         except Exception:
             log.exception("couldn't apply the mobile view setting")
@@ -669,7 +687,7 @@ class LyricsApp:
             import mobile_dialog
             mobile_dialog.show(self.root, MOBILE_PORT, MOBILE_ENABLED)
         except Exception:
-            log.exception("couldn't open the mobile address window")
+            log.exception("couldn't open the web view window")
 
     def _mobile_state(self):
         """What the phone page should show right now (same scene as the strip)."""
@@ -783,7 +801,8 @@ class LyricsApp:
                     release, progress=lambda d, t: self.post(lambda: _safe(dlg.progress, d, t)))
             except RuntimeError as exc:
                 log.warning("update download failed: %s", exc)
-                self.post(lambda: _safe(dlg.failed, str(exc)))
+                msg = str(exc)         # `exc` is deleted when the except block ends, so keep a copy
+                self.post(lambda: _safe(dlg.failed, msg))
                 return
             except Exception:
                 log.exception("update download crashed")
@@ -823,7 +842,8 @@ class LyricsApp:
             win = tk.Toplevel(self.root)
             win.withdraw()                     # stays hidden while it is built, then appears at its final size
             win.attributes("-topmost", True)   # the strip is topmost too; stay above it
-            config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_reset_position=self.reset_position)
+            config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_reset_position=self.reset_position,
+                                       timing=self)
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(win))
             self._settings_window = win
             win.focus_force()
@@ -1234,6 +1254,23 @@ class LyricsApp:
         else:
             self._set_banner("Those lyrics couldn't be used", 4.0)
 
+    # --- what the Settings > Timing tab uses (it runs on the Tk thread, so these are plain calls) ---
+
+    def timing_info(self):
+        """(song name or None, this song's offset in ms) for the Settings window."""
+        if self._song_key is None or not self.track:
+            return None, 0
+        return (self.title_text or "this song"), int(self.song_offset_ms)
+
+    def timing_nudge(self, delta_ms):
+        self._nudge_song_offset(delta_ms)
+
+    def timing_reset(self):
+        self._nudge_song_offset(None)
+
+    def timing_lookup_again(self):
+        self._lookup_again()
+
     def _nudge_song_offset(self, delta_ms):
         """Shift this song's lyrics by delta_ms (None = back to 0) and remember it for next time."""
         if self._song_key is None or not self.track:
@@ -1250,7 +1287,7 @@ class LyricsApp:
 
     def _on_hotkey(self, hid):
         """Runs on the hotkey thread: only hands the action to the Tk thread."""
-        action = {1: lambda: self._nudge_song_offset(-100), 2: lambda: self._nudge_song_offset(+100),
+        action = {1: lambda: self._nudge_song_offset(+100), 2: lambda: self._nudge_song_offset(-100),
                   3: lambda: self._nudge_song_offset(None)}.get(hid)
         if action:
             self.post(action)
@@ -1302,11 +1339,13 @@ class LyricsApp:
             self._reset_track_state()
             self._is_playing = False
             self._refresh_current_labels()
+            self._sync_now_playing(grace=True)
             return
 
         changed = track["id"] != self.current_track_id
         if changed:
             self._begin_track(track)
+            self._sync_now_playing()
 
         polled = track["progress_ms"] / 1000.0
         was_playing = self._is_playing
@@ -1328,6 +1367,35 @@ class LyricsApp:
 
         self._update_display(self._estimate_position_s())
         self._refresh_current_labels()
+
+    # ------------------------------------------- now playing text file (OBS) --
+
+    def _now_playing_text(self):
+        t = self.track
+        if not t or is_non_song(t.get("name"), t.get("artist")):
+            return ""
+        return nowplaying.format_track(NOW_PLAYING_FORMAT, t.get("artist"), t.get("name"))
+
+    def _sync_now_playing(self, grace=False):
+        """Make LycRomanise.txt say what is playing. It stays on the song while it is paused. With
+        grace=True an empty answer (nothing playing) is not written at once: if the player is still
+        silent NOW_PLAYING_CLEAR_S seconds later the file is emptied, so a skip or an ad doesn't flicker it."""
+        try:
+            if not NOW_PLAYING_FILE:
+                return
+            text = self._now_playing_text()
+            if text or not grace:
+                self._np.write(text)
+                return
+            if not self._np_clear_pending:
+                self._np_clear_pending = True
+                self.root.after(int(NOW_PLAYING_CLEAR_S * 1000), self._clear_now_playing_later)
+        except Exception:
+            log.exception("couldn't update the now playing file")
+
+    def _clear_now_playing_later(self):
+        self._np_clear_pending = False
+        self._sync_now_playing()
 
     def _reset_track_state(self):
         self.current_track_id = None

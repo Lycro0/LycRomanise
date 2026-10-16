@@ -36,6 +36,17 @@ def _font_file(bold):
     return path if os.path.isfile(path) else None
 
 
+# Segoe UI has no glyph for the music note that marks an instrumental break (U+266A); drawing it
+# with Segoe UI alone gives the empty "missing glyph" box. Characters the main font lacks are drawn
+# with one of these instead (Tk's own canvas does this by itself; the Pillow strip has to be told).
+FALLBACK_FONT_NAMES = ("seguisym.ttf", "segoeuib.ttf", "arial.ttf", "msgothic.ttc", "malgun.ttf", "simsun.ttc")
+
+
+def _fallback_font_files():
+    folder = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    return [p for p in (os.path.join(folder, n) for n in FALLBACK_FONT_NAMES) if os.path.isfile(p)]
+
+
 def available(font_file=_font_file):
     return Image is not None and font_file(False) is not None and font_file(True) is not None
 
@@ -54,10 +65,13 @@ def _rgba(value, default=(255, 255, 255, 255)):
 class StripRenderer:
     """Draws what the strip's code asks of a Tk canvas onto a transparent RGBA image."""
 
-    def __init__(self, meter, dpi=96.0, font_file=_font_file):
+    def __init__(self, meter, dpi=96.0, font_file=_font_file, fallback_files=_fallback_font_files):
         self.meter, self.dpi, self._font_file = meter, float(dpi), font_file
+        self._fallback_files = fallback_files
         self.img = self._draw = None
         self._fonts, self._tiles = {}, {}
+        self._glyph_fonts = {}          # (bold, px, character) -> the Pillow font that can draw it
+        self._notdef = {}               # (bold, px) -> what a missing glyph looks like in the main font
 
     # --- frame ------------------------------------------------------------
 
@@ -81,6 +95,48 @@ class StripRenderer:
             f = self._fonts[key] = ImageFont.truetype(self._font_file(bold), px)
         return key, f
 
+    @staticmethod
+    def _glyph_bytes(pil_font, ch):
+        try:
+            mask = pil_font.getmask(ch)
+            return (mask.size, bytes(mask))
+        except Exception:
+            return None
+
+    def _has_glyph(self, pil_font, key, ch):
+        """False when `pil_font` would draw `ch` as the empty 'missing glyph' box."""
+        if ord(ch) < 0x250:                # Latin text: always there
+            return True
+        ref = self._notdef.get(key)
+        if ref is None:
+            ref = self._notdef[key] = self._glyph_bytes(pil_font, "\uffff") or False
+        got = self._glyph_bytes(pil_font, ch)
+        if got is None:
+            return False
+        return not (ref and got == ref)
+
+    def _font_for(self, key, pil_font, ch):
+        """The font to draw `ch` with: the main one, or the first fallback font that has the glyph."""
+        ck = (key, ch)
+        f = self._glyph_fonts.get(ck)
+        if f is not None:
+            return f
+        f = pil_font
+        if not self._has_glyph(pil_font, key, ch):
+            bold, px = key
+            for path in self._fallback_files():
+                try:
+                    cand = ImageFont.truetype(path, px)
+                except Exception:
+                    continue
+                if self._has_glyph(cand, ("fb", path, px), ch):
+                    f = cand
+                    break
+        if len(self._glyph_fonts) > 4096:
+            self._glyph_fonts.clear()
+        self._glyph_fonts[ck] = f
+        return f
+
     def _origin(self, x, y, text, font, anchor, pil_font):
         p = self.meter.prefix(font, text)
         asc, desc = pil_font.getmetrics()
@@ -100,15 +156,15 @@ class StripRenderer:
     def create_text(self, x, y, text="", font=None, fill="#ffffff", anchor="nw", justify=None, **_k):
         if not text:
             return
-        _key, pf = self._pil_font(font)
+        key, pf = self._pil_font(font)
         color = _rgba(fill)
         if len(text) == 1 and (anchor or "nw") == "nw":
-            self._draw.text((x, y), text, font=pf, fill=color, anchor="la")
+            self._draw.text((x, y), text, font=self._font_for(key, pf, text), fill=color, anchor="la")
             return
         p, left, top, _ls = self._origin(x, y, text, font, anchor, pf)
         for i, ch in enumerate(text):
             if ch != " ":
-                self._draw.text((left + p[i], top), ch, font=pf, fill=color, anchor="la")
+                self._draw.text((left + p[i], top), ch, font=self._font_for(key, pf, ch), fill=color, anchor="la")
 
     def create_rectangle(self, x0, y0, x1, y1, outline="", width=1, **_k):
         if outline:
@@ -135,7 +191,8 @@ class StripRenderer:
             for dx, dy in _outline_offsets(round(size, 2)):
                 for i, ch in enumerate(text):
                     if ch != " ":
-                        d.text((pad + p[i] + dx, pad + dy), ch, font=pf, fill=orgb + (255,), anchor="la")
+                        d.text((pad + p[i] + dx, pad + dy), ch, font=self._font_for(key, pf, ch),
+                               fill=orgb + (255,), anchor="la")
             self._tiles[tkey] = tile
         self._over(tile, int(round(left)) - pad, int(round(top)) - pad)
 
@@ -198,6 +255,8 @@ class AlphaStrip(StripRenderer):
         self._dib = self._bits = self._old = self._dc = None
         self._dib_size = None
         self._errors = 0
+        self._reset_tried = False
+        self._last_error = 0
 
     # --- window ---------------------------------------------------------------
 
@@ -220,6 +279,10 @@ class AlphaStrip(StripRenderer):
         self._owner = None if self.taskbar else self._make_owner()
         u = self._ulw
         u.ShowWindow(hwnd, SW_HIDE)
+        # UpdateLayeredWindow fails (error 87) on a window that SetLayeredWindowAttributes has ever been
+        # called on, which Tk and the click-through code do. Clearing the layered bit and setting it
+        # again wipes that history, whatever order startup happened to run in.
+        self._api.SetWindowLongW(hwnd, self._winsys.GWL_EXSTYLE, style & ~self._winsys.WS_EX_LAYERED)
         self._api.SetWindowLongW(hwnd, self._winsys.GWL_EXSTYLE, style)
         if self._owner:
             u.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, self._owner)
@@ -304,6 +367,14 @@ class AlphaStrip(StripRenderer):
         self._free()
         self._hwnd = self._owner = None
 
+    def _reset_layered(self):
+        """Clear and set the layered style again (see _attach). Used when UpdateLayeredWindow refuses."""
+        if self._hwnd is None:
+            return
+        style = self._api.GetWindowLongW(self._hwnd, self._winsys.GWL_EXSTYLE)
+        self._api.SetWindowLongW(self._hwnd, self._winsys.GWL_EXSTYLE, style & ~self._winsys.WS_EX_LAYERED)
+        self._api.SetWindowLongW(self._hwnd, self._winsys.GWL_EXSTYLE, style | self._winsys.WS_EX_LAYERED)
+
     def _free(self):
         if self._dc:
             if self._old:
@@ -334,6 +405,18 @@ class AlphaStrip(StripRenderer):
 
     # --- push a frame ---------------------------------------------------------
 
+    def _push(self, size, origin, blend):
+        ct = self._ct
+        screen = self._ulw.GetDC(None)
+        try:
+            ok = self._ulw.UpdateLayeredWindow(
+                self._hwnd, screen, None, ct.byref(size), self._dc, ct.byref(origin),
+                0, ct.byref(blend), 2)                              # ULW_ALPHA
+            self._last_error = 0 if ok else ct.get_last_error()     # read before ReleaseDC can overwrite it
+            return ok
+        finally:
+            self._ulw.ReleaseDC(None, screen)
+
     def commit(self):
         """Show the finished frame. Sets self.failed after repeated errors so the app can fall back."""
         if self.failed or self.img is None:
@@ -348,16 +431,17 @@ class AlphaStrip(StripRenderer):
             ct.memmove(self._bits, data, len(data))
             size, origin = self._wt.SIZE(w, h), self._wt.POINT(0, 0)
             blend = self._BLEND(0, 0, 255, 1)                          # AC_SRC_OVER, per-pixel alpha
-            screen = self._ulw.GetDC(None)
-            try:
-                ok = self._ulw.UpdateLayeredWindow(
-                    self._hwnd, screen, None, ct.byref(size), self._dc, ct.byref(origin),
-                    0, ct.byref(blend), 2)                              # ULW_ALPHA
-            finally:
-                self._ulw.ReleaseDC(None, screen)
+            ok = self._push(size, origin, blend)
+            if not ok and self._last_error == 87 and not self._reset_tried:
+                # "invalid parameter": the window still carries an old SetLayeredWindowAttributes call.
+                self._reset_tried = True
+                log.info("true transparency: resetting the layered window style and trying again")
+                self._reset_layered()
+                ok = self._push(size, origin, blend)
             if not ok:
-                raise OSError("UpdateLayeredWindow failed (error %s)" % ct.get_last_error())
+                raise OSError("UpdateLayeredWindow failed (error %s)" % self._last_error)
             self._errors = 0
+            self._reset_tried = False
         except Exception:
             self._errors += 1
             if self._errors == 1:

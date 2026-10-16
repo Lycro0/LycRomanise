@@ -1,4 +1,4 @@
-"""Small window that shows the address of the mobile view (and a QR code to scan with the phone)."""
+"""Small windows for the web view: its address (with a QR code), and a QR-code-only window (and a QR code to scan with the phone)."""
 
 import logging
 import tkinter as tk
@@ -35,20 +35,20 @@ def _qr_photo(url, box=6):
 
 
 def show(parent, port, enabled=True):
-    """Open the 'Mobile view' window. `parent` is any Tk widget."""
+    """Open the 'Web view' window. `parent` is any Tk widget."""
     url = mobile_server.mobile_url(port)
     win = tk.Toplevel(parent)
-    win.title("LycRomanise - Mobile view")
+    win.title("LycRomanise - Web view")
     win.configure(bg=BG)
     win.attributes("-topmost", True)
-    tk.Label(win, text="Lyrics on your phone or tablet", fg=FG, bg=BG,
+    tk.Label(win, text="Lyrics on the web (phone, tablet, OBS)", fg=FG, bg=BG,
              font=("Segoe UI", 12, "bold")).pack(padx=20, pady=(16, 4))
     steps = ("1. Put the phone on the same Wi-Fi as this PC.\n"
              "2. Open this address in Safari / Chrome (or scan the code).\n"
              "3. Tap the page once for full screen.")
     tk.Label(win, text=steps, fg=FG_DIM, bg=BG, font=("Segoe UI", 10), justify="left").pack(padx=20, pady=(0, 8))
     if not enabled:
-        tk.Label(win, text="Mobile view is currently OFF - turn it on in Settings or the tray menu.",
+        tk.Label(win, text="Web view is currently OFF - turn it on in Settings or the tray menu.",
                  fg="#ff8a8a", bg=BG, font=("Segoe UI", 10, "bold"), wraplength=320).pack(padx=20, pady=(0, 8))
     field = tk.Entry(win, font=("Consolas", 12), justify="center", bg=FIELD_BG, fg=FG, relief="flat",
                      insertbackground=FG, readonlybackground=FIELD_BG)
@@ -76,4 +76,24 @@ def show(parent, port, enabled=True):
               font=("Segoe UI", 10)).pack(side="left", padx=4)
     tk.Button(row, text="Close", command=win.destroy, bg=ACCENT, fg="#0d0d0d", relief="flat", padx=14, pady=5,
               font=("Segoe UI", 10, "bold")).pack(side="left", padx=4)
+    return win
+
+
+def show_qr(parent, port):
+    """A small window with nothing but the QR code for the web view address."""
+    url = mobile_server.mobile_url(port)
+    win = tk.Toplevel(parent)
+    win.title("LycRomanise - QR code")
+    win.configure(bg="#ffffff")
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+    photo = _qr_photo(url, box=7)
+    if photo is not None:
+        lbl = tk.Label(win, image=photo, bg="#ffffff", bd=0)
+        lbl.image = photo
+        lbl.pack(padx=10, pady=10)
+    else:
+        tk.Label(win, text="The QR code needs the 'qrcode' package.\nUse the address instead:\n" + url,
+                 bg="#ffffff", fg="#222222", font=("Segoe UI", 10), padx=20, pady=20).pack()
+    win.bind("<Escape>", lambda _e: win.destroy())
     return win

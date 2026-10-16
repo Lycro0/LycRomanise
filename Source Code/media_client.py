@@ -11,6 +11,7 @@ was first seen. Lyrics still work, but the timing can be a bit off after a seek.
 
 import asyncio
 import ctypes
+import gc
 import logging
 import sys
 import threading
@@ -51,6 +52,7 @@ NOT_A_SONG = {"", "spotify", "spotify free", "spotify premium", "advertisement",
 PAUSED_TITLES = ("spotify", "spotify free", "spotify premium", "spotifast", "fastpotify")
 
 PLAYING = 4          # GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+SMTC_CALL_TIMEOUT_S = 20.0   # one media-session call (a stuck one is abandoned and the thread replaced)
 SMTC_MAX_FAILURES = 5        # in a row, then the media controls are left alone for a while
 SMTC_RETRY_AFTER_S = 30.0    # ...and tried again after this long
 
@@ -96,6 +98,61 @@ def _td_ms(value):
         return 0.0
 
 
+class _WinRtThread:
+    """One long-lived thread that owns every Windows media-session (WinRT) object.
+
+    WinRT objects must be created, used and released on the thread that owns them. Before v1.8.0 each
+    poll ran on a fresh worker thread, so the objects of one poll were released by Python's garbage
+    collector on whatever thread happened to be running at the time, and Windows answered with
+    RPC_E_WRONG_THREAD (0x8001010e, the lines in crash-native.log). Everything now runs on this thread, and a
+    collection runs here right after each call, while the objects are still on their own thread."""
+
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._main, daemon=True, name="winrt")
+        self.thread.start()
+
+    def _main(self):
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_forever()
+        finally:
+            try:
+                gc.collect()
+                self.loop.close()
+            except Exception:
+                pass
+
+    def alive(self):
+        return self.thread.is_alive() and not self.loop.is_closed()
+
+    async def _wrap(self, coro):
+        try:
+            return await coro
+        finally:
+            await asyncio.sleep(0)          # the call's own frame is finished: its objects are unreferenced
+            gc.collect()                    # ...and are released here, on their own thread
+
+    def run(self, coro, timeout):
+        fut = asyncio.run_coroutine_threadsafe(self._wrap(coro), self.loop)
+        try:
+            return fut.result(timeout)
+        except BaseException:
+            fut.cancel()
+            raise
+
+    def _shutdown(self):
+        for task in asyncio.all_tasks(self.loop):
+            task.cancel()                       # a stuck call gets to unwind before the loop stops
+        self.loop.call_later(0.3, self.loop.stop)
+
+    def stop(self):
+        try:
+            self.loop.call_soon_threadsafe(self._shutdown)
+        except RuntimeError:
+            pass
+
+
 class MediaClient:
     """poll() -> ("ok", track) / ("idle", None) / ("error", None)."""
 
@@ -110,7 +167,7 @@ class MediaClient:
         self._len_prev_ms = 0           # last length seen for the song before it
         self._len_last_ms = 0           # latest length seen for the current song
         self._poll_lock = threading.Lock()
-        self._loop = None               # the one event loop used for media-session calls
+        self._rt = None                 # the one thread (and event loop) used for media-session calls
         self._matches, self._matches_at = None, 0.0
         self._len_first_ms = 0          # first length reported for this song
         self._len_seen_at = 0.0
@@ -147,7 +204,7 @@ class MediaClient:
                 # No supported media session: maybe the player isn't open - try the window title.
             except Exception as exc:
                 self._smtc_failures += 1
-                self._manager = None
+                self._drop_manager()
                 log.warning("Windows media controls failed (%s: %s)", type(exc).__name__, exc)
                 if self._smtc_failures >= SMTC_MAX_FAILURES:
                     self._smtc_retry_at = time.monotonic() + SMTC_RETRY_AFTER_S
@@ -163,23 +220,39 @@ class MediaClient:
             self._matches, self._matches_at = player_matches(), now
         return self._matches
 
+    @property
+    def _loop(self):
+        """The event loop media-session calls run on (None before the first call)."""
+        return self._rt.loop if self._rt is not None else None
+
     def _run(self, coro):
-        """Run a coroutine on one long-lived event loop instead of building and tearing one down
-        on every poll. Callers hold _poll_lock, so the loop is never used by two threads at once.
-        A broken or closed loop is replaced."""
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            loop = self._loop = asyncio.new_event_loop()
+        """Run a coroutine on the one long-lived WinRT thread instead of a new thread and loop on every
+        poll. Callers hold _poll_lock. A broken, stuck or crashed thread is replaced."""
+        rt = self._rt
+        if rt is None or not rt.alive():
+            rt = self._rt = _WinRtThread()
         try:
-            return loop.run_until_complete(coro)
+            return rt.run(coro, SMTC_CALL_TIMEOUT_S)
         except BaseException:
-            # Anything unexpected (including a loop left in a bad state): start fresh next time.
-            try:
-                loop.close()
-            except Exception:
-                pass
-            self._loop = None
+            # Anything unexpected (including a call that never came back): start fresh next time.
+            self._rt = None
+            rt.stop()
             raise
+
+    def _drop_manager(self):
+        """Forget the session manager. It is released on the WinRT thread, the one that made it."""
+        rt = self._rt
+        if rt is not None and rt.alive():
+            try:
+                rt.loop.call_soon_threadsafe(self._clear_manager)
+                return
+            except RuntimeError:
+                pass
+        self._manager = None
+
+    def _clear_manager(self):
+        self._manager = None
+        gc.collect()
 
     def _smtc_usable(self):
         """False while the media controls are resting after repeated failures. After the rest one

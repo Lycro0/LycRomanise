@@ -1,8 +1,8 @@
 """LycRomanise — appearance settings editor.
 
 A small standalone GUI for changing how the Desktop Lyrics strip looks:
-the karaoke colors, the text outline colour, the "next line" color, font sizes, the strip's
-size, and the optional mobile view — without touching JSON by hand.
+the karaoke colors, the text outline colour, the "next line" color, the strip's
+size, this song's lyric timing, and the web view / OBS options — without touching JSON by hand.
 
 Normally opened from the tray icon
 ("Settings…"). It can also run on its own: python config_editor.py
@@ -14,8 +14,10 @@ so there is no Save-and-restart step.
 
 import logging
 import os
+import time
 import tkinter as tk
 from tkinter import colorchooser, messagebox
+from tkinter import font as tkfont
 
 import config
 import winsys
@@ -32,6 +34,7 @@ FG_DIM = "#a9a4d0"
 ACCENT = "#7c6cf0"      # same purple as the update window
 ACCENT_HI = "#9486ff"
 FONT = "Segoe UI"
+TIMING_STEP_MS = 100     # one step on the Timing tab
 
 
 def _set_window_icon(win):
@@ -105,12 +108,37 @@ class SizeRow(tk.Frame):
         self.var = tk.IntVar(value=initial_value)
         self.last_good = initial_value
         self.lo, self.hi = from_, to
+        self._after = None
         if on_change:
-            self.var.trace_add("write", lambda *_: on_change())
+            # Typing "1000" passes through 1, 10 and 100: applying each of those made the strip jump to its
+            # smallest size and back. The change is applied once typing pauses (a spin-button click is
+            # applied at once, a typed value when the field loses focus or Enter is pressed).
+            self.var.trace_add("write", lambda *_: self._soon(on_change))
         _label(self, label).pack(side="left")
         if unit:
             _label(self, unit, size=9, color=FG_DIM).pack(side="right", padx=(6, 0))
-        _spinbox(self, self.var, from_, to, step).pack(side="right")
+        self.spin = _spinbox(self, self.var, from_, to, step)
+        self.spin.pack(side="right")
+        if on_change:
+            self.spin.bind("<FocusOut>", lambda _e: self._now(on_change), add="+")
+            self.spin.bind("<Return>", lambda _e: self._now(on_change), add="+")
+
+    def _soon(self, on_change, delay_ms=600):
+        try:
+            if self._after is not None:
+                self.after_cancel(self._after)
+            self._after = self.after(delay_ms, lambda: self._now(on_change))
+        except tk.TclError:
+            pass
+
+    def _now(self, on_change):
+        try:
+            if self._after is not None:
+                self.after_cancel(self._after)
+        except tk.TclError:
+            pass
+        self._after = None
+        on_change()
 
     def get(self):
         """The value, clamped; half-typed text ("", "-") keeps the last good value."""
@@ -121,46 +149,64 @@ class SizeRow(tk.Frame):
         return self.last_good
 
 
-class ConfigEditor:
-    TABS = (("look", "Look"), ("text", "Text & size"), ("behaviour", "Behaviour"), ("mobile", "Phone & OBS"))
+PREVIEW_TEXT = "Thanks for using LycRomanise"
+PREVIEW_H = 74
 
-    def __init__(self, root, on_apply=None, on_reset_position=None):
+
+class ConfigEditor:
+    TABS = (("visuals", "Visuals"), ("window", "Window"), ("timing", "Timing"), ("web", "Web and OBS"))
+
+    def __init__(self, root, on_apply=None, on_reset_position=None, timing=None):
         self.root = root
         self.on_reset_position = on_reset_position
         self.on_apply = on_apply     # optional: called right after each save (the app also watches the file)
+        self.timing = timing         # the running app (timing_info / timing_nudge / ...), or None when run alone
         self._built = False
         self._pages = {}
         self._tab_buttons = {}
+        self._anim_after = None
+        self._anim_t0 = time.perf_counter()
+        self._anim_items = []
+        self._anim_done = -1
         self.root.title("LycRomanise v%s — Settings" % __import__("version").__version__)
         self.root.configure(bg=BG)
         _set_window_icon(self.root)
 
         settings = config.load_appearance()
 
-        # Bottom buttons first so they stay visible however small the window gets.
-        self._build_buttons()
+        self._build_buttons()          # bottom buttons first so they always stay visible
         self._build_header()
         self._build_tabbar()
-        body = self._make_scroll_area()
+        self._body = tk.Frame(self.root, bg=BG)
+        self._body.pack(fill="both", expand=True)
         for key, _title in self.TABS:
-            page = tk.Frame(body, bg=BG)
-            self._pages[key] = page
+            self._pages[key] = tk.Frame(self._body, bg=BG)
 
-        self._build_look(self._pages["look"], settings)
-        self._build_text(self._pages["text"], settings)
-        self._build_behaviour(self._pages["behaviour"], settings)
-        self._build_mobile(self._pages["mobile"], settings)
+        self._build_visuals(self._pages["visuals"], settings)
+        self._build_window(self._pages["window"], settings)
+        self._build_timing(self._pages["timing"])
+        self._build_web(self._pages["web"], settings)
 
         self._built = True
         self._current_tab = None
         self._fit_window()
-        self._show_tab("look")
-        self._draw_preview()
+        self._show_tab("visuals")
+        self._rebuild_preview()
+        self._tick_preview()
+        self._poll_timing()
+        self.root.bind("<Destroy>", self._on_destroy, add="+")
         self._present()
 
+    def _on_destroy(self, event):
+        if event.widget is self.root and self._anim_after is not None:
+            try:
+                self.root.after_cancel(self._anim_after)
+            except tk.TclError:
+                pass
+            self._anim_after = None
+
     def _present(self):
-        """Work out the window's final size while it is still hidden, centre it, then show it: it opens
-        at its normal size instead of starting small and growing."""
+        """Work out the window's final size while it is still hidden, centre it, then show it."""
         try:
             self.root.update_idletasks()
             w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
@@ -179,13 +225,16 @@ class ConfigEditor:
 
     def _build_header(self):
         head = tk.Frame(self.root, bg=BG)
-        head.pack(fill="x", padx=18, pady=(16, 8))
+        head.pack(fill="x", padx=18, pady=(16, 6))
         tk.Label(head, text="Settings", fg=FG, bg=BG, font=(FONT, 16, "bold")).pack(anchor="w")
-        tk.Label(head, text="Every change is saved and applied to the strip the moment you make it.",
+        tk.Label(head, text="Every change is saved and applied the moment you make it.",
                  fg=FG_DIM, bg=BG, font=(FONT, 9)).pack(anchor="w", pady=(0, 10))
-        self.preview_canvas = tk.Canvas(head, height=50, bg="#000000", highlightthickness=1,
+        self.preview_canvas = tk.Canvas(head, height=PREVIEW_H, bg="#000000", highlightthickness=1,
                                         highlightbackground=FIELD)
         self.preview_canvas.pack(fill="x")
+        self.preview_canvas.bind("<Configure>", lambda _e: self._rebuild_preview())
+        tk.Label(head, text="what lyrics will look like ^", fg=FG_DIM, bg=BG,
+                 font=(FONT, 8)).pack(pady=(3, 0))
 
     def _build_tabbar(self):
         bar = tk.Frame(self.root, bg=BG)
@@ -204,98 +253,213 @@ class ConfigEditor:
         self._pages[key].pack(fill="x", padx=18, pady=(0, 10))
         self._tab_buttons[key].configure(bg=ACCENT, fg="white")
         self._current_tab = key
-        try:
-            self._scroll_canvas.yview_moveto(0)
-        except Exception:
-            pass
 
     def _card(self, page, title, note=None):
         """A titled group of settings; returns the frame to put rows in."""
-        outer = tk.Frame(page, bg=CARD, padx=16, pady=12)
-        outer.pack(fill="x", pady=(0, 10))
-        _label(outer, title, size=11, bold=True).pack(fill="x")
+        outer = tk.Frame(page, bg=CARD, padx=16, pady=10)
+        outer.pack(fill="x", pady=(0, 8))
+        if title:
+            _label(outer, title, size=11, bold=True).pack(fill="x")
         if note:
-            _label(outer, note, size=9, color=FG_DIM, wraplength=420).pack(fill="x", pady=(2, 0))
+            _label(outer, note, size=9, color=FG_DIM, wraplength=430).pack(fill="x", pady=(2, 0))
         inner = tk.Frame(outer, bg=CARD)
-        inner.pack(fill="x", pady=(8, 0))
+        inner.pack(fill="x", pady=(6 if title else 0, 0))
         return inner
 
     def _toggle(self, card, text, var, hint=None):
         row = tk.Frame(card, bg=CARD)
-        row.pack(fill="x", pady=5)
+        row.pack(fill="x", pady=4)
         Toggle(row, var, self._changed).pack(side="right", padx=(12, 0))
         left = tk.Frame(row, bg=CARD)
         left.pack(side="left", fill="x", expand=True)
-        title = _label(left, text, wraplength=340)
+        title = _label(left, text, wraplength=360)
         title.pack(fill="x")
         title.bind("<Button-1>", lambda _e, v=var: (v.set(not v.get()), self._changed()))   # the text ticks it too
         if hint:
-            _label(left, hint, size=9, color=FG_DIM, wraplength=340).pack(fill="x")
+            _label(left, hint, size=9, color=FG_DIM, wraplength=360).pack(fill="x")
         return row
 
     def _button(self, parent, text, command, primary=False):
         return tk.Button(parent, text=text, command=command, relief="flat", cursor="hand2", padx=12, pady=5,
                          bg=ACCENT if primary else FIELD, fg="white" if primary else FG,
                          activebackground=ACCENT_HI if primary else "#3a3566", activeforeground="white",
-                         font=(FONT, 10, "bold" if primary else "normal"))
+                         disabledforeground=FG_DIM, font=(FONT, 10, "bold" if primary else "normal"))
 
     # ------------------------------------------------------------ tabs --
 
-    def _build_look(self, page, st):
-        card = self._card(page, "Colours", "The title card uses the 'Already sung' colour and the text outline colour.")
+    def _build_visuals(self, page, st):
+        card = self._card(page, "Colours")
         self.unsung_row = ColorRow(card, "Not yet sung", st["karaoke_unsung_rgb"], self._changed)
         self.sung_row = ColorRow(card, "Already sung", st["karaoke_sung_rgb"], self._changed)
         self.next_row = ColorRow(card, "Next line", st["next_line_rgb"], self._changed)
         self.outline_row = ColorRow(card, "Text outline", st["outline_rgb"], self._changed)
         for row in (self.unsung_row, self.sung_row, self.next_row, self.outline_row):
             row.pack(fill="x", pady=4)
-            row.swatch.bind("<Button-1>", lambda _e: self._draw_preview(), add="+")
         card = self._card(page, "Title card")
         self.title_var = tk.BooleanVar(value=bool(st["show_title_card"]))
         self._toggle(card, "Show 'Artist - Song' first", self.title_var,
-                     "For about 10 seconds, or until the first lyric starts.")
+                     "For about 10 seconds, or until the first lyric starts. It uses the 'Already sung' and outline colours.")
 
-    def _build_text(self, page, st):
+    def _build_window(self, page, st):
         card = self._card(page, "Strip size")
         self.width_row = SizeRow(card, "Width", st["desktop_width"], 300, 2000, self._changed, "px")
         self.height_row = SizeRow(card, "Height", st["desktop_height"], 80, 500, self._changed, "px")
         self.width_row.pack(fill="x", pady=4)
         self.height_row.pack(fill="x", pady=4)
-        card = self._card(page, "Lyrics timing")
-        self.offset_row = SizeRow(card, "Lyric offset", st["lyric_offset_ms"], -3000, 3000, self._changed, "ms", step=100)
-        self.offset_row.pack(fill="x", pady=4)
-        _label(card, "Positive: lyrics appear earlier. Negative: later.", size=9, color=FG_DIM).pack(fill="x")
-
-    def _build_behaviour(self, page, st):
         card = self._card(page, "Strip")
         self.hide_lock_var = tk.BooleanVar(value=bool(st["hide_lock_icon"]))
         self.taskbar_var = tk.BooleanVar(value=bool(st["show_in_taskbar"]))
-        self._toggle(card, "Hide the lock icon", self.hide_lock_var, "Lock and unlock from the tray menu only.")
+        self._toggle(card, "Hide the lock button", self.hide_lock_var, "Lock and unlock from the tray menu only.")
         self._toggle(card, "Show a taskbar button", self.taskbar_var, "Helps OBS and other tools find the window.")
         self._button(card, "Reset lyrics position", self._reset_position).pack(anchor="w", pady=(8, 0))
-        if winsys.is_windows():
-            card = self._card(page, "Windows")
-            self.autostart_var = tk.BooleanVar(value=winsys.autostart_enabled())
-            self._toggle(card, "Start with Windows", self.autostart_var)
-            # this one applies at once instead of through the debounced save
-            self.autostart_var.trace_add("write", lambda *_: self._autostart_changed())
-        else:
-            self.autostart_var = None
 
-    def _build_mobile(self, page, st):
-        card = self._card(page, "Phones and tablets",
-                          "Show the lyrics on a device on the same Wi-Fi. Windows may ask to allow LycRomanise "
-                          "through the firewall: allow it on Private networks.")
+    def _build_timing(self, page):
+        card = self._card(page, "Lyrics timing for this song",
+                          "Use this when the lyrics run early or late. It is remembered for this song. "
+                          "Each step is 0.1 seconds. Plus shows the lyrics earlier, minus shows them later.")
+        self.timing_song = _label(card, "", size=9, color=FG_DIM, wraplength=430)
+        self.timing_song.pack(fill="x", pady=(0, 6))
+        row = tk.Frame(card, bg=CARD)
+        row.pack(pady=(4, 0))
+        self._timing_buttons = []
+        for text, steps in (("-10", -10), ("-1", -1)):
+            self._timing_button(row, text, steps).pack(side="left", padx=4)
+        self.timing_value = tk.Label(row, text="0", fg=FG, bg=CARD, width=5, font=(FONT, 30, "bold"))
+        self.timing_value.pack(side="left", padx=8)
+        for text, steps in (("+1", 1), ("+10", 10)):
+            self._timing_button(row, text, steps).pack(side="left", padx=4)
+        self.timing_ms = _label(card, "", size=9, color=FG_DIM)
+        self.timing_ms.configure(anchor="center", justify="center")
+        self.timing_ms.pack(fill="x", pady=(2, 8))
+        self.timing_reset_btn = self._button(card, "Reset offset to default", self._timing_reset)
+        self.timing_reset_btn.pack(pady=(0, 2))
+        self._timing_buttons.append(self.timing_reset_btn)
+        card = self._card(page, "Wrong or missing lyrics?")
+        self.timing_lookup_btn = self._button(card, "Look up lyrics again", self._timing_lookup)
+        self.timing_lookup_btn.pack(anchor="w")
+        self._timing_buttons.append(self.timing_lookup_btn)
+        self._timing_shown = None
+
+    def _timing_button(self, parent, text, steps):
+        b = self._button(parent, text, lambda s=steps: self._timing_nudge(s))
+        b.configure(width=4, font=(FONT, 11, "bold"))
+        self._timing_buttons.append(b)
+        return b
+
+    def _timing_info(self):
+        if self.timing is None:
+            return None, 0
+        try:
+            return self.timing.timing_info()
+        except Exception:
+            log.exception("couldn't read the song timing")
+            return None, 0
+
+    def _timing_nudge(self, steps):
+        if self.timing is not None:
+            self.timing.timing_nudge(steps * TIMING_STEP_MS)
+            self._poll_timing(again=False)
+
+    def _timing_reset(self):
+        if self.timing is not None:
+            self.timing.timing_reset()
+            self._poll_timing(again=False)
+
+    def _timing_lookup(self):
+        if self.timing is not None:
+            self.timing.timing_lookup_again()
+
+    def _poll_timing(self, again=True):
+        """Keep the Timing tab in step with the song (it can change while Settings is open)."""
+        try:
+            if not self.root.winfo_exists():
+                return
+            name, ms = self._timing_info()
+            if (name, ms) != self._timing_shown:
+                self._timing_shown = (name, ms)
+                steps = ms / float(TIMING_STEP_MS)
+                self.timing_value.configure(text=("%+d" % round(steps)) if ms else "0")
+                if name is None:
+                    self.timing_song.configure(text="Nothing is playing right now.")
+                    self.timing_ms.configure(text="")
+                else:
+                    self.timing_song.configure(text=name)
+                    self.timing_ms.configure(text=("%+d ms" % ms) if ms else "default timing")
+                for b in self._timing_buttons:
+                    b.configure(state="normal" if name is not None else "disabled")
+            if again:
+                self.root.after(400, self._poll_timing)
+        except tk.TclError:
+            pass
+
+    def _build_web(self, page, st):
+        card = self._card(page, "Web view",
+                          "Shows the lyrics in any browser on your network: a phone or tablet, or an OBS Browser "
+                          "source. Windows may ask to allow LycRomanise through the firewall (allow Private networks).")
         self.mobile_var = tk.BooleanVar(value=bool(st["mobile_enabled"]))
-        self._toggle(card, "Show the lyrics on phones and tablets", self.mobile_var)
+        self._toggle(card, "Enable web view for web and OBS", self.mobile_var)
         self.port_row = SizeRow(card, "Port", st["mobile_port"], 1024, 65535, self._changed)
         self.port_row.pack(fill="x", pady=4)
-        self._button(card, "Show address / QR code…", self._show_mobile, primary=True).pack(anchor="w", pady=(8, 0))
-        card = self._card(page, "OBS and other screens")
+        self.url_var = tk.StringVar(value=self._web_url())
+        self.url_entry = tk.Entry(card, textvariable=self.url_var, state="readonly", font=("Consolas", 11),
+                                  justify="center", bg=FIELD, fg=FG, readonlybackground=FIELD, relief="flat",
+                                  highlightthickness=1, highlightbackground=FIELD)
+        self.url_entry.pack(fill="x", pady=(6, 6), ipady=5)
+        btns = tk.Frame(card, bg=CARD)
+        btns.pack(anchor="w")
+        self._button(btns, "Copy URL", self._copy_url).pack(side="left")
+        self._button(btns, "Show QR code", self._show_qr).pack(side="left", padx=(8, 0))
+        card = self._card(page, "OBS text file",
+                          "LycRomanise.txt always says what is playing. In OBS add a Text (GDI+) source and tick 'Read from file'.")
+        self.np_var = tk.BooleanVar(value=bool(st["now_playing_file"]))
+        self._toggle(card, "Keep LycRomanise.txt up to date", self.np_var)
+        row = tk.Frame(card, bg=CARD)
+        row.pack(fill="x", pady=(2, 0))
+        _label(row, "Text").pack(side="left")
+        import nowplaying
+        self._np_labels = nowplaying.FORMAT_LABELS
+        self.np_format_var = tk.StringVar(value=self._np_labels.get(st["now_playing_format"], "Artist - Song"))
+        menu = tk.OptionMenu(row, self.np_format_var, *self._np_labels.values(), command=lambda _v: self._changed())
+        menu.configure(bg=FIELD, fg=FG, activebackground=ACCENT, activeforeground="white", relief="flat",
+                       highlightthickness=0, bd=0, font=(FONT, 10), cursor="hand2")
+        menu["menu"].configure(bg=FIELD, fg=FG, activebackground=ACCENT, activeforeground="white", bd=0)
+        menu.pack(side="right")
+        btns = tk.Frame(card, bg=CARD)
+        btns.pack(anchor="w", pady=(6, 0))
+        self._button(btns, "Copy path", self._copy_np_path).pack(side="left")
+        self._button(btns, "Open folder", self._open_np_folder).pack(side="left", padx=(8, 0))
+        card = self._card(page, None)
         self.hide_strip_var = tk.BooleanVar(value=bool(st["hide_desktop_strip"]))
         self._toggle(card, "Hide the lyrics on this PC", self.hide_strip_var,
-                     "For when you only use the OBS browser source or a phone. Only takes effect while "
-                     "'Show the lyrics on phones and tablets' is on.")
+                     "Only show them in the web view / OBS. Takes effect while the web view is enabled.")
+
+    def _web_url(self):
+        try:
+            import mobile_server
+            return mobile_server.mobile_url(self.port_row.get())
+        except Exception:
+            return ""
+
+    def _refresh_url(self):
+        url = self._web_url()
+        if url != self.url_var.get():
+            self.url_var.set(url)
+
+    def _copy_url(self):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.url_var.get())
+            self.root.update()
+        except Exception:
+            log.exception("couldn't copy the address")
+
+    def _show_qr(self):
+        try:
+            import mobile_dialog
+            self._save()                  # make sure the latest port is saved/applied first
+            mobile_dialog.show_qr(self.root, self.port_row.get())
+        except Exception:
+            log.exception("couldn't show the QR code")
 
     # ------------------------------------------------------------ layout --
 
@@ -305,26 +469,8 @@ class ConfigEditor:
         self._button(btns, "Done", self._done, primary=True).pack(side="right")
         self._button(btns, "Reset to defaults", self._reset).pack(side="left")
 
-    def _make_scroll_area(self):
-        """A vertically scrolling body. The window is sized from its content (not a
-        fixed pixel size) so it fits at any display scaling, and scrolls when the
-        screen is too short to show everything."""
-        outer = tk.Frame(self.root, bg=BG)
-        outer.pack(fill="both", expand=True)
-        self._scroll_canvas = canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
-        bar = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=bar.set)
-        bar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        self._scroll_body = inner = tk.Frame(canvas, bg=BG)
-        window = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
-        self.root.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-        return inner
-
     def _fit_window(self):
-        """Size the window from the tallest tab (so switching tabs doesn't resize it), capped to the screen."""
+        """Size the body from the tallest tab, so switching tabs never resizes the window (no scrolling)."""
         try:
             self.root.update_idletasks()
             want_h = want_w = 0
@@ -332,33 +478,66 @@ class ConfigEditor:
                 page.pack(fill="x", padx=18, pady=(0, 10))
                 self.root.update_idletasks()
                 want_h = max(want_h, int(page.winfo_reqheight()) + 10)
-                want_w = max(want_w, int(page.winfo_reqwidth()) + 36 + 20)
+                want_w = max(want_w, int(page.winfo_reqwidth()) + 36)
                 page.pack_forget()
-            max_h = int(self.root.winfo_screenheight() * 0.78) - 260    # room for header, tabs, buttons, taskbar
-            self._scroll_canvas.configure(width=max(want_w, 470), height=max(160, min(want_h, max_h)))
+            self._body.configure(width=max(want_w, 500), height=want_h)
+            self._body.pack_propagate(False)
         except Exception:
             log.warning("couldn't size the settings window from its content", exc_info=True)
 
-    def _draw_preview(self):
-        # Spinboxes/colour rows fire their change callback while the window is
-        # still being built, before the preview canvas exists.
+    # ------------------------------------------------------------ preview --
+
+    def _hex(self, row):
+        return "#%02x%02x%02x" % tuple(max(0, min(255, c)) for c in row.rgb)
+
+    def _rebuild_preview(self):
+        """Lay the sample line out again (colours or width changed) and start it from the left."""
         c = getattr(self, "preview_canvas", None)
-        if c is None:
+        if c is None or not hasattr(self, "outline_row"):
             return
         c.delete("all")
-        w = c.winfo_width() or 340
-        half = "half-sung, half-not — like the real thing"
-        mid = len(half) // 2
-        x = 10
-        unsung_hex = "#%02x%02x%02x" % tuple(self.unsung_row.rgb)
-        sung_hex = "#%02x%02x%02x" % tuple(self.sung_row.rgb)
-        outline_hex = "#%02x%02x%02x" % tuple(self.outline_row.rgb)
-        for i, ch in enumerate(half):
-            color = sung_hex if i < mid else unsung_hex
-            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-                c.create_text(x + dx, 22 + dy, text=ch, fill=outline_hex, anchor="w", font=("Segoe UI", 13, "bold"))
-            c.create_text(x, 22, text=ch, fill=color, anchor="w", font=("Segoe UI", 13, "bold"))
-            x += 9
+        self._anim_items = []
+        self._anim_done = -1
+        w = c.winfo_width() or 460
+        font = tkfont.Font(family=FONT, size=20, weight="bold")
+        total = font.measure(PREVIEW_TEXT)
+        x0 = max(6, (w - total) / 2.0)
+        cy = PREVIEW_H / 2.0
+        outline = self._hex(self.outline_row)
+        unsung = self._hex(self.unsung_row)
+        for i, ch in enumerate(PREVIEW_TEXT):
+            if ch == " ":
+                self._anim_items.append(None)
+                continue
+            x = x0 + font.measure(PREVIEW_TEXT[:i])
+            for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+                c.create_text(x + dx, cy + dy, text=ch, fill=outline, anchor="w", font=font)
+            self._anim_items.append(c.create_text(x, cy, text=ch, fill=unsung, anchor="w", font=font))
+        self._anim_font = font
+
+    def _tick_preview(self):
+        """A small karaoke sweep: the line fills left to right, holds for a moment, then starts over."""
+        try:
+            if not self.root.winfo_exists():
+                return
+            sweep, hold = 3.2, 1.4
+            t = (time.perf_counter() - self._anim_t0) % (sweep + hold)
+            frac = min(1.0, t / sweep)
+            n = len(self._anim_items)
+            done = int(frac * n + 0.0001) if frac < 1.0 else n
+            if done != self._anim_done:
+                sung, unsung = self._hex(self.sung_row), self._hex(self.unsung_row)
+                for i, item in enumerate(self._anim_items):
+                    if item is not None:
+                        self.preview_canvas.itemconfigure(item, fill=sung if i < done else unsung)
+                self._anim_done = done
+            self._anim_after = self.root.after(40, self._tick_preview)
+        except tk.TclError:
+            self._anim_after = None
+
+    def _draw_preview(self):
+        """Colours changed: rebuild the sample so every colour is current."""
+        self._rebuild_preview()
 
     def _collect(self):
         return {
@@ -367,7 +546,6 @@ class ConfigEditor:
             "next_line_rgb": self.next_row.rgb,
             "desktop_width": self.width_row.get(),
             "desktop_height": self.height_row.get(),
-            "lyric_offset_ms": self.offset_row.get(),
             "show_title_card": bool(self.title_var.get()),
             "hide_lock_icon": bool(self.hide_lock_var.get()),
             "show_in_taskbar": bool(self.taskbar_var.get()),
@@ -375,6 +553,8 @@ class ConfigEditor:
             "hide_desktop_strip": bool(self.hide_strip_var.get()),
             "mobile_enabled": bool(self.mobile_var.get()),
             "mobile_port": self.port_row.get(),
+            "now_playing_file": bool(self.np_var.get()),
+            "now_playing_format": self._np_format_key(),
         }
 
     def _reset_position(self):
@@ -389,38 +569,50 @@ class ConfigEditor:
             log.exception("couldn't reset the position")
             messagebox.showerror("Lyrics position", "Couldn't reset the position. See logs/lycromanise.log.")
 
-    def _show_mobile(self):
-        import mobile_dialog
-        self._save()                          # make sure the latest port is saved/applied first
-        mobile_dialog.show(self.root, self.port_row.get(), bool(self.mobile_var.get()))
+    def _copy_np_path(self):
+        try:
+            path = config.now_playing_path()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(path)
+            self.root.update()
+        except Exception:
+            log.exception("couldn't copy the path")
+
+    def _open_np_folder(self):
+        try:
+            path = config.now_playing_path()
+            folder = os.path.dirname(os.path.abspath(path))
+            os.makedirs(folder, exist_ok=True)
+            if winsys.is_windows():
+                os.startfile(folder)      # noqa: S606 - Explorer on our own data folder
+        except Exception:
+            log.exception("couldn't open the folder")
+            messagebox.showerror("OBS text file", "Couldn't open the folder. See logs/lycromanise.log.")
+
+    def _np_format_key(self):
+        shown = self.np_format_var.get()
+        for key, label in self._np_labels.items():
+            if label == shown:
+                return key
+        return "artist_title"
 
     def _changed(self, *_):
-        """Something was edited: refresh the preview, then save and apply it to the strip straight away."""
+        """Something was edited: refresh the sample, then save and apply it to the strip straight away."""
         if not getattr(self, "_built", False):
             return      # initial values being filled in while the window is built: nothing to save
-        self._draw_preview()
-        self._save()
-
-    def _autostart_changed(self):
-        if getattr(self, "_autostart_busy", False):
-            return
-        self._autostart_busy = True
         try:
-            if not winsys.set_autostart(bool(self.autostart_var.get())):
-                self.autostart_var.set(winsys.autostart_enabled())
-                messagebox.showerror("Start with Windows", "Couldn't change the setting. See logs/lycromanise.log.")
-        finally:
-            self._autostart_busy = False
-        if self.on_apply:
-            try:
-                self.on_apply()      # refreshes the tray menu's check mark
-            except Exception:
-                log.exception("applying settings failed")
+            if not self.root.winfo_exists():
+                return  # a delayed change arriving after the window was closed
+        except tk.TclError:
+            return
+        self._draw_preview()
+        self._refresh_url()
+        self._save()
 
     def _save(self):
         try:
             # Merge into the current file so settings this window doesn't show
-            # (spawn height, max line length...) survive a save.
+            # (spawn height, max line length, global lyric offset...) survive a save.
             merged = config.load_appearance()
             merged.update(self._collect())
             config.save_appearance(merged)
@@ -435,6 +627,10 @@ class ConfigEditor:
                 log.exception("applying settings failed")
 
     def _done(self):
+        try:
+            self._save()          # a number typed a moment ago may not have been applied yet
+        except Exception:
+            log.exception("couldn't save on closing")
         self.root.destroy()
 
     def _reset(self):
@@ -452,14 +648,16 @@ class ConfigEditor:
             row.hex_label.configure(text=row._hex())
         self.width_row.var.set(defaults["desktop_width"])
         self.height_row.var.set(defaults["desktop_height"])
-        self.offset_row.var.set(defaults["lyric_offset_ms"])
         self.title_var.set(defaults["show_title_card"])
         self.hide_lock_var.set(defaults["hide_lock_icon"])
         self.taskbar_var.set(defaults["show_in_taskbar"])
         self.mobile_var.set(defaults["mobile_enabled"])
         self.hide_strip_var.set(defaults["hide_desktop_strip"])
         self.port_row.var.set(defaults["mobile_port"])
+        self.np_var.set(defaults["now_playing_file"])
+        self.np_format_var.set(self._np_labels.get(defaults["now_playing_format"], "Artist - Song"))
         self._draw_preview()
+        self._refresh_url()
         self._save()
 
 

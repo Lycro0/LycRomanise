@@ -38,6 +38,8 @@ DEFAULT_APPEARANCE = {
     "mobile_enabled": False,                # True: also show the lyrics on phones/tablets on the same Wi-Fi (built-in web page)
     "mobile_port": 8765,                    # port of that web page
     "show_in_taskbar": False,               # True: the strip also has a taskbar button (so OBS and other tools can list it); applies live
+    "now_playing_file": True,               # True: keep LycRomanise.txt (the song that is playing) up to date for an OBS text source
+    "now_playing_format": "artist_title",   # what LycRomanise.txt says: artist_title | title_artist | title
 }
 
 # key -> (type, minimum, maximum) for numbers; colours are checked by _rgb / _hex
@@ -47,7 +49,9 @@ _RANGES = {
     "spawn_y_percent": (float, 0, 90), "mobile_port": (int, 1024, 65535),
 }
 _RGB_KEYS = ("karaoke_unsung_rgb", "karaoke_sung_rgb", "next_line_rgb", "outline_rgb")
-_BOOL_KEYS = ("show_title_card", "hide_lock_icon", "hide_desktop_strip", "mobile_enabled", "show_in_taskbar")
+_BOOL_KEYS = ("show_title_card", "hide_lock_icon", "hide_desktop_strip", "mobile_enabled", "show_in_taskbar",
+              "now_playing_file")
+_CHOICES = {"now_playing_format": ("artist_title", "title_artist", "title")}
 
 
 def _rgb(value, default):
@@ -83,6 +87,8 @@ def sanitize(settings):
             out[key] = _hex(value, default)
         elif key in _BOOL_KEYS:
             out[key] = value if isinstance(value, bool) else default
+        elif key in _CHOICES:
+            out[key] = value if value in _CHOICES[key] else default
         elif key in _RANGES:
             cast, lo, hi = _RANGES[key]
             try:
@@ -112,6 +118,26 @@ def config_str_list(key):
     except (OSError, ValueError):
         pass
     return []
+
+
+def now_playing_path():
+    """Where LycRomanise.txt goes: the data folder, unless config.json has "now_playing_path" (a full
+    path to the .txt file, or to a folder to put LycRomanise.txt in)."""
+    import nowplaying
+    default = os.path.join(BASE_DIR, nowplaying.FILE_NAME)
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            val = data.get("now_playing_path") if isinstance(data, dict) else None
+            if isinstance(val, str) and val.strip():
+                val = os.path.expandvars(os.path.expanduser(val.strip()))
+                if os.path.isdir(val) or val.endswith(("\\", "/")):
+                    return os.path.join(val, nowplaying.FILE_NAME)
+                return val
+    except (OSError, ValueError):
+        pass
+    return default
 
 
 def check_updates_enabled():

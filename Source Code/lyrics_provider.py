@@ -32,6 +32,11 @@ LRCLIB_GET = "https://lrclib.net/api/get"
 LRCLIB_SEARCH = "https://lrclib.net/api/search"
 # LRCLIB asks clients to identify themselves.
 LRCLIB_HEADERS = {"User-Agent": "LycRomanise (https://github.com/Lycro0/LycRomanise)"}
+# lrcmux (lrcmux.dev) asks several lyrics sites at once and answers in the same format as LRCLIB, so it
+# is used as the second source whenever LRCLIB has nothing. Any other LRCLIB-compatible server can be
+# added with "extra_lyrics_apis" in config.json (see the README).
+LRCMUX_BASE = "https://lrcmux.dev/api"
+MAX_EXTRA_APIS = 4
 
 log = logging.getLogger("lycro.lyrics")
 
@@ -53,7 +58,7 @@ CACHE_PATH = os.path.join(_APP_DIR, "lyrics_cache.json")
 CACHE_MAX_ENTRIES = 300
 # Bump when the way lyrics are chosen changes: older cache entries are then ignored and
 # looked up again.
-CACHE_VERSION = 10   # 10: instrumental markers, offset-aware parser; 9: no language preference, exact-length entries skip the overrun check; 8: Korean-first tie-break (removed); 7: language-edition tie-break; 6: lookups made with a stale song length are dropped; 5: LRCLIB only, no word timing (v1.2.0); 4: cleaned-title retries; 3: language tags
+CACHE_VERSION = 10   # (v1.8.0 adds a second source, lrcmux; the cache format is unchanged) 10: instrumental markers, offset-aware parser; 9: no language preference, exact-length entries skip the overrun check; 8: Korean-first tie-break (removed); 7: language-edition tie-break; 6: lookups made with a stale song length are dropped; 5: LRCLIB only, no word timing (v1.2.0); 4: cleaned-title retries; 3: language tags
 
 # --- provider health -------------------------------------------------------------
 # A source that keeps failing at the network level (timeouts, HTTP 5xx/403/429) is
@@ -497,9 +502,11 @@ def _lrclib_variants(track_name, artist_name):
     return [p for p in dict.fromkeys(pairs) if p[0] and p[1]]
 
 
-def _lrclib_get(params):
-    """Exact lookup. A 404 just means LRCLIB does not know the song (not a failure)."""
-    resp = _http("lrclib", "GET", LRCLIB_GET, params=params, headers=LRCLIB_HEADERS, ok_statuses=(404,))
+def _lrclib_get(params, source="lrclib", base=None):
+    """Exact lookup. A 404 just means the server does not know the song (not a failure).
+    `base` is another LRCLIB-compatible server's /api address (None: LRCLIB itself)."""
+    url = base.rstrip("/") + "/get" if base else LRCLIB_GET
+    resp = _http(source, "GET", url, params=params, headers=LRCLIB_HEADERS, ok_statuses=(404,))
     if resp is not None and resp.status_code == 200:
         data = _safe_json(resp)
         if isinstance(data.get("syncedLyrics"), str) and data["syncedLyrics"]:
@@ -507,9 +514,10 @@ def _lrclib_get(params):
     return None
 
 
-def _lrclib_search(params):
+def _lrclib_search(params, source="lrclib", base=None):
     """Results of /api/search that have synced lyrics, as candidates for _pick_candidate."""
-    resp = _http("lrclib", "GET", LRCLIB_SEARCH, params=params, headers=LRCLIB_HEADERS)
+    url = base.rstrip("/") + "/search" if base else LRCLIB_SEARCH
+    resp = _http(source, "GET", url, params=params, headers=LRCLIB_HEADERS)
     if resp is None:
         return []
     try:
@@ -535,8 +543,8 @@ def _ms(seconds):
     return int(seconds * 1000)
 
 
-def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=None):
-    """Exact lookup first, then searches that retry with a cleaned title / first artist only /
+def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=None, source="lrclib", base=None):
+    """Ask LRCLIB (or, with `source` and `base`, another server that speaks the same language). Exact lookup first, then searches that retry with a cleaned title / first artist only /
     a free-text query, always ranked by _pick_candidate. When several entries tie, the
     edition in the title/artist's own language wins, if any (see preferred_script)."""
     started = time.monotonic()
@@ -552,15 +560,15 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
             params["album_name"] = album_name
         if secs:
             params["duration"] = secs
-        data = _lrclib_get(params)
+        data = _lrclib_get(params, source, base)
         if data:
             got = lyrics_script(data["syncedLyrics"])
-            log.info("lrclib: exact match id %s %r by %s (%.0fs, album %r, %s lyrics)%s", data.get("id"),
+            log.info("%s: exact match id %s %r by %s (%.0fs, album %r, %s lyrics)%s", source, data.get("id"),
                      data.get("trackName"), data.get("artistName"), data.get("duration") or 0,
                      data.get("albumName"), got, " after cleaning to %r - %r" % (t, a) if i else "")
             if want and got != want:
                 fallback = data
-                log.info("lrclib: that entry is in %s but %s is preferred: checking for another edition", got, want)
+                log.info("%s: that entry is in %s but %s is preferred: checking for another edition", source, got, want)
                 break
             _tl.match_dur_ms = _ms(data.get("duration"))
             return parse_lrc(data["syncedLyrics"]), data.get("plainLyrics")
@@ -573,10 +581,10 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
     for params in queries:
         if time.monotonic() - started > LRCLIB_BUDGET_S:
             break
-        for c in _lrclib_search(params):
+        for c in _lrclib_search(params, source, base):
             seen.setdefault(c["id"], c)
         cands = list(seen.values())
-        song = _pick_candidate("lrclib", cands, track_name, artist_name, duration_ms, want) if cands else None
+        song = _pick_candidate(source, cands, track_name, artist_name, duration_ms, want) if cands else None
         if song:
             if not want or lyrics_script(song["_r"]["syncedLyrics"]) == want:
                 _tl.match_dur_ms = song["dur_ms"]
@@ -588,7 +596,7 @@ def _fetch_from_lrclib(track_name, artist_name, album_name=None, duration_ms=Non
     if best is not None:
         _tl.match_dur_ms = best["dur_ms"]
         return parse_lrc(best["_r"]["syncedLyrics"]), best["_r"].get("plainLyrics")
-    log.info("lrclib: no synced lyrics for %r - %r", track_name, artist_name)
+    log.info("%s: no synced lyrics for %r - %r", source, track_name, artist_name)
     return None, None
 
 
@@ -802,6 +810,9 @@ def search_alternatives(track_name, artist_name, duration_ms=None, limit=12):
             break
         for c in _lrclib_search(params):
             seen.setdefault(c["id"], c)
+    if len(seen) < 4 and not source_paused("lrcmux"):       # LRCLIB knows few editions: ask lrcmux too
+        for c in _lrclib_search(queries[0], "lrcmux", LRCMUX_BASE):
+            seen.setdefault("lrcmux:%s" % c["id"], c)
     want = (duration_ms or 0) / 1000.0
     out = []
     for c in seen.values():
@@ -838,9 +849,41 @@ def use_alternative(track_name, artist_name, duration_ms, alt):
 # Online lookups in order of preference: (name, function(track, artist, album, duration_ms) ->
 # (synced_lines, plain_text)). The first one with usable lyrics wins. Your own .lrc files are not
 # listed here: fetch_lyrics() looks at them first (see _try_local).
+def _compat_source(name, base):
+    """A lookup function for an LRCLIB-compatible server at `base`."""
+    def lookup(track_name, artist_name, album_name=None, duration_ms=None):
+        return _fetch_from_lrclib(track_name, artist_name, album_name, duration_ms, source=name, base=base)
+    lookup.__name__ = "_fetch_from_" + name
+    return lookup
+
+
 SOURCES = (
     ("lrclib", _fetch_from_lrclib),
+    ("lrcmux", _compat_source("lrcmux", LRCMUX_BASE)),
 )
+
+
+def extra_api_bases():
+    """LRCLIB-compatible servers listed under "extra_lyrics_apis" in config.json, e.g.
+    ["https://lrclib.example.org/api"]. https only, at most MAX_EXTRA_APIS."""
+    try:
+        import config
+        urls = config.config_str_list("extra_lyrics_apis")
+    except Exception:
+        return []
+    out = []
+    for u in urls:
+        u = u.strip().rstrip("/")
+        if u.lower().startswith("https://") and len(u) < 300 and u not in out:
+            out.append(u)
+    return out[:MAX_EXTRA_APIS]
+
+
+def _sources():
+    """SOURCES plus the user's extra servers, asked last. Read from config.json each time (it is tiny)."""
+    extra = tuple(("extra%d" % (i + 1), _compat_source("extra%d" % (i + 1), base))
+                  for i, base in enumerate(extra_api_bases()))
+    return tuple(SOURCES) + extra
 
 
 def _try_local(track_name, artist_name, album_name, duration_ms):
@@ -925,7 +968,7 @@ SOURCE_WAIT_S = 12.0
 def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
     started = time.monotonic()
     asked_any = False
-    for name, lookup in SOURCES:
+    for name, lookup in _sources():
         if source_paused(name):
             global _last_outage
             _last_outage = time.monotonic()

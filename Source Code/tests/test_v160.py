@@ -245,9 +245,9 @@ class UpdaterTests(unittest.TestCase):
 
 class VersionTests(unittest.TestCase):
     def test_version_is_current_everywhere(self):
-        self.assertEqual(version.__version__, "1.7.0")
+        self.assertEqual(version.__version__, "1.8.0")
         here = os.path.join(os.path.dirname(__file__), "..", "..", "builder")
-        for name, needle in (("installer.iss", '"1.7.0"'), ("version_info.txt", "1.7.0.0")):
+        for name, needle in (("installer.iss", '"1.8.0"'), ("version_info.txt", "1.8.0.0")):
             path = os.path.join(here, name)
             if os.path.exists(path):          # these live in the "builder" folder
                 with open(path, encoding="utf-8") as f:
