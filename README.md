@@ -38,6 +38,6 @@ Changes apply instantly.
 
 ## Need more?
 
-See [DETAILS.md](DETAILS.md) for troubleshooting, your own lyric files, running from source and building.
+See [DETAILS.md](https://github.com/Lycro0/LycRomanise/blob/main/Source%20Code/DETAILS.md) for troubleshooting, your own lyric files, running from source and building.
 
 Not affiliated with Spotify, Apple or Lyricify.
