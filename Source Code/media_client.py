@@ -220,11 +220,6 @@ class MediaClient:
             self._matches, self._matches_at = player_matches(), now
         return self._matches
 
-    @property
-    def _loop(self):
-        """The event loop media-session calls run on (None before the first call)."""
-        return self._rt.loop if self._rt is not None else None
-
     def _run(self, coro):
         """Run a coroutine on the one long-lived WinRT thread instead of a new thread and loop on every
         poll. Callers hold _poll_lock. A broken, stuck or crashed thread is replaced."""
@@ -278,8 +273,8 @@ class MediaClient:
                 seen_ids.append(app_id)
                 if not any(m in app_id for m in matches):
                     continue
-                playing = int(getattr(s.get_playback_info().playback_status, "value",
-                                      s.get_playback_info().playback_status)) == PLAYING
+                status = s.get_playback_info().playback_status
+                playing = int(getattr(status, "value", status)) == PLAYING
                 if session is None or (playing and not session_playing):
                     session, session_playing, session_app = s, playing, app_id    # prefer whichever is playing
             except Exception:

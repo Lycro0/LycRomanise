@@ -21,6 +21,7 @@ from tkinter import font as tkfont
 
 import config
 import winsys
+from version import __version__
 
 log = logging.getLogger("lycro.settings")
 
@@ -150,7 +151,15 @@ class SizeRow(tk.Frame):
 
 
 PREVIEW_TEXT = "Thanks for using LycRomanise"
+PREVIEW_LINES = (PREVIEW_TEXT, "Enjoy the lyrics")   # the sample alternates between these, like a song's lines
 PREVIEW_H = 74
+# These follow the real strip (app.py): same slide time, same easing, same karaoke edge, same reveal.
+PREVIEW_ANIM_S = 0.28          # app.LINE_ANIM_SECONDS: the rise from the next-line slot to the top slot
+PREVIEW_FILL_S = 2.4           # how long the colour takes to sweep across a line
+PREVIEW_LINE_S = 3.0           # time each line stays on top before the next one rises
+PREVIEW_TOP_PT, PREVIEW_NEXT_PT = 17, 12   # 25 / 20 pt on the strip, scaled to fit the sample
+PREVIEW_TOP_Y, PREVIEW_NEXT_Y = 25, 56
+PREVIEW_TICK_MS = 16
 
 
 class ConfigEditor:
@@ -166,9 +175,11 @@ class ConfigEditor:
         self._tab_buttons = {}
         self._anim_after = None
         self._anim_t0 = time.perf_counter()
-        self._anim_items = []
-        self._anim_done = -1
-        self.root.title("LycRomanise v%s — Settings" % __import__("version").__version__)
+        self._anim_font = tkfont.Font(family=FONT, size=PREVIEW_TOP_PT, weight="bold")
+        self._anim_next_font = tkfont.Font(family=FONT, size=PREVIEW_NEXT_PT, weight="bold")
+        self._anim_colors = None
+        self._anim_widths = {}
+        self.root.title("LycRomanise v%s — Settings" % __version__)
         self.root.configure(bg=BG)
         _set_window_icon(self.root)
 
@@ -491,47 +502,78 @@ class ConfigEditor:
         return "#%02x%02x%02x" % tuple(max(0, min(255, c)) for c in row.rgb)
 
     def _rebuild_preview(self):
-        """Lay the sample line out again (colours or width changed) and start it from the left."""
+        """Colours or width changed: pick the new colours up. The sample keeps running where it was."""
         c = getattr(self, "preview_canvas", None)
         if c is None or not hasattr(self, "outline_row"):
             return
-        c.delete("all")
-        self._anim_items = []
-        self._anim_done = -1
-        w = c.winfo_width() or 460
-        font = tkfont.Font(family=FONT, size=20, weight="bold")
-        total = font.measure(PREVIEW_TEXT)
-        x0 = max(6, (w - total) / 2.0)
-        cy = PREVIEW_H / 2.0
-        outline = self._hex(self.outline_row)
-        unsung = self._hex(self.unsung_row)
-        for i, ch in enumerate(PREVIEW_TEXT):
+        self._anim_colors = {
+            "sung": tuple(self.sung_row.rgb), "unsung": tuple(self.unsung_row.rgb),
+            "next": self._hex(self.next_row), "outline": self._hex(self.outline_row)}
+
+    def _prefix(self, font, text):
+        """Cumulative widths of text[:i], cached per (text, font size), as the strip's TextMeter does."""
+        key = (text, int(font.cget("size")))
+        got = self._anim_widths.get(key)
+        if got is None:
+            got = [font.measure(text[:i]) for i in range(len(text) + 1)]
+            self._anim_widths[key] = got
+        return got
+
+    def _preview_line(self, c, text, font, cx, cy, fraction, colors):
+        """One line with a dark outline; yellow turns to pink left to right with a soft edge, like the strip."""
+        prefix = self._prefix(font, text)
+        total = prefix[-1]
+        start_x = cx - total / 2.0
+        fill_x = fraction * total
+        gradient_px = max(10.0, total / max(1, len(text)) * 2.2)
+        outline = colors["outline"]
+        sung, unsung = colors["sung"], colors["unsung"]
+        for i, ch in enumerate(text):
             if ch == " ":
-                self._anim_items.append(None)
                 continue
-            x = x0 + font.measure(PREVIEW_TEXT[:i])
-            for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+            x = start_x + prefix[i]
+            for dx, dy in ((-1.5, 0), (1.5, 0), (0, -1.5), (0, 1.5), (-1, -1), (1, 1), (-1, 1), (1, -1)):
                 c.create_text(x + dx, cy + dy, text=ch, fill=outline, anchor="w", font=font)
-            self._anim_items.append(c.create_text(x, cy, text=ch, fill=unsung, anchor="w", font=font))
-        self._anim_font = font
+            mid = (prefix[i] + prefix[i + 1]) / 2.0
+            t = max(0.0, min(1.0, (mid - fill_x) / gradient_px))
+            rgb = tuple(max(0, min(255, int(sung[k] + (unsung[k] - sung[k]) * t))) for k in range(3))
+            c.create_text(x, cy, text=ch, fill="#%02x%02x%02x" % rgb, anchor="w", font=font)
 
     def _tick_preview(self):
-        """A small karaoke sweep: the line fills left to right, holds for a moment, then starts over."""
+        """The sample plays the strip's line change: the next line rises into the top slot while growing,
+        the colour sweeps across it, and the line after fades up underneath. Then the lines swap."""
         try:
             if not self.root.winfo_exists():
                 return
-            sweep, hold = 3.2, 1.4
-            t = (time.perf_counter() - self._anim_t0) % (sweep + hold)
-            frac = min(1.0, t / sweep)
-            n = len(self._anim_items)
-            done = int(frac * n + 0.0001) if frac < 1.0 else n
-            if done != self._anim_done:
-                sung, unsung = self._hex(self.sung_row), self._hex(self.unsung_row)
-                for i, item in enumerate(self._anim_items):
-                    if item is not None:
-                        self.preview_canvas.itemconfigure(item, fill=sung if i < done else unsung)
-                self._anim_done = done
-            self._anim_after = self.root.after(40, self._tick_preview)
+            c = self.preview_canvas
+            if self._anim_colors is None:
+                self._rebuild_preview()
+            colors = self._anim_colors
+            if colors is not None:
+                el = time.perf_counter() - self._anim_t0
+                k = int(el // PREVIEW_LINE_S)
+                t_line = el - k * PREVIEW_LINE_S
+                top_text = PREVIEW_LINES[k % len(PREVIEW_LINES)]
+                next_text = PREVIEW_LINES[(k + 1) % len(PREVIEW_LINES)]
+                anim_t = min(1.0, t_line / PREVIEW_ANIM_S)
+                eased = 1 - (1 - anim_t) ** 3
+                cx = (c.winfo_width() or 460) / 2.0
+                c.delete("all")
+                # the rising line: from the next-line slot and size to the top slot and size
+                y = PREVIEW_NEXT_Y + (PREVIEW_TOP_Y - PREVIEW_NEXT_Y) * eased
+                size = round(PREVIEW_NEXT_PT + (PREVIEW_TOP_PT - PREVIEW_NEXT_PT) * eased)
+                self._anim_font.configure(size=max(PREVIEW_NEXT_PT, size))
+                self._preview_line(c, top_text, self._anim_font, cx, y, min(1.0, t_line / PREVIEW_FILL_S), colors)
+                # the next line appears once the rising line has cleared its slot
+                reveal = max(0.0, min(1.0, (anim_t - 0.35) / 0.65))
+                if reveal > 0.0:
+                    ny = PREVIEW_NEXT_Y + (1.0 - (1 - (1 - reveal) ** 3)) * 8
+                    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        c.create_text(cx + dx, ny + dy, text=next_text, fill=colors["outline"], anchor="center",
+                                      font=self._anim_next_font)
+                    c.create_text(cx, ny, text=next_text, fill=colors["next"], anchor="center",
+                                  font=self._anim_next_font)
+            self._anim_after = self.root.after(PREVIEW_TICK_MS, self._tick_preview)
         except tk.TclError:
             self._anim_after = None
 

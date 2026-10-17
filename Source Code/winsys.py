@@ -1,8 +1,7 @@
 """Windows integration for LycRomanise: running as its own console-less
 app, a single-instance guard, and the optional "start with Windows" entry.
 
-Everything here is a safe no-op on non-Windows systems, and every OS call can
-be swapped out (the tests do) so the logic is checkable without Windows.
+Everything here is a safe no-op on non-Windows systems.
 """
 
 import logging
@@ -263,11 +262,6 @@ def enable_dpi_awareness(shcore=None, user32=None):
 _api_cache = None
 
 
-def env_flag(name):
-    """True when the SPOTI_DEBUG_* switch is set to something other than 0/empty."""
-    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
-
-
 def _hwnd_api():
     """user32 with proper 64-bit-safe prototypes (built once, then cached)."""
     global _api_cache
@@ -288,14 +282,6 @@ def _hwnd_api():
     u.InvalidateRect.argtypes = (wintypes.HWND, wintypes.LPVOID, wintypes.BOOL)
     u.RedrawWindow.restype = wintypes.BOOL
     u.RedrawWindow.argtypes = (wintypes.HWND, wintypes.LPVOID, wintypes.HANDLE, wintypes.UINT)
-    u.IsWindowVisible.restype = wintypes.BOOL
-    u.IsWindowVisible.argtypes = (wintypes.HWND,)
-    u.GetLayeredWindowAttributes.restype = wintypes.BOOL
-    u.GetLayeredWindowAttributes.argtypes = (
-        wintypes.HWND, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(ctypes.c_ubyte),
-        ctypes.POINTER(wintypes.DWORD))
-    u.GetWindowRect.restype = wintypes.BOOL
-    u.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
     _api_cache = u
     return u
 
@@ -355,37 +341,6 @@ def invalidate(tk_window_id, api=None):
         ok = api.InvalidateRect(hwnd, None, False)
     if not ok:
         raise OSError("RedrawWindow/InvalidateRect returned 0")
-
-
-def describe_window(tk_window_id, api=None):
-    """Facts about the real Win32 window for the diagnostics log."""
-    import ctypes
-    from ctypes import wintypes
-    api = api or _hwnd_api()
-    inner = tk_window_id
-    parent = api.GetParent(inner)
-    root = top_level_hwnd(inner, api)
-    info = {"inner": inner, "parent": parent, "root": root}
-    for label, h in (("inner", inner), ("root", root)):
-        try:
-            info["exstyle_" + label] = hex(api.GetWindowLongW(h, GWL_EXSTYLE) & 0xFFFFFFFF)
-        except Exception as exc:
-            info["exstyle_" + label] = "err:%s" % exc
-    try:
-        flags, colorkey, alpha = wintypes.DWORD(0), wintypes.DWORD(0), ctypes.c_ubyte(0)
-        ok = api.GetLayeredWindowAttributes(root, ctypes.byref(colorkey), ctypes.byref(alpha), ctypes.byref(flags))
-        info["layered_attrs"] = ("flags=%#x colorkey=%#08x alpha=%d" % (flags.value, colorkey.value, alpha.value)) \
-            if ok else "not set (GetLayeredWindowAttributes failed, err %s)" % ctypes.get_last_error()
-    except Exception as exc:
-        info["layered_attrs"] = "err:%s" % exc
-    try:
-        info["visible_root"] = bool(api.IsWindowVisible(root))
-        rect = wintypes.RECT()
-        if api.GetWindowRect(root, ctypes.byref(rect)):
-            info["rect"] = (rect.left, rect.top, rect.right, rect.bottom)
-    except Exception as exc:
-        info["visible_root"] = "err:%s" % exc
-    return info
 
 
 def open_url(url):

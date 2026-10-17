@@ -1,4 +1,4 @@
-"""Small windows for the web view: its address (with a QR code), and a QR-code-only window (and a QR code to scan with the phone)."""
+"""Small windows for the web view: its address with a QR code, and a window with just the QR code."""
 
 import logging
 import tkinter as tk
@@ -34,10 +34,31 @@ def _qr_photo(url, box=6):
         return None
 
 
+_open = {}          # "info" / "qr" -> the window that is open, so a second click brings it forward
+
+
+def _reuse(kind):
+    """The already-open window of this kind, raised, or None."""
+    win = _open.get(kind)
+    if win is None:
+        return None
+    try:
+        win.deiconify()
+        win.lift()
+        return win
+    except tk.TclError:
+        _open.pop(kind, None)
+        return None
+
+
 def show(parent, port, enabled=True):
     """Open the 'Web view' window. `parent` is any Tk widget."""
+    existing = _reuse("info")
+    if existing is not None:
+        return existing
     url = mobile_server.mobile_url(port)
     win = tk.Toplevel(parent)
+    _open["info"] = win
     win.title("LycRomanise - Web view")
     win.configure(bg=BG)
     win.attributes("-topmost", True)
@@ -81,8 +102,12 @@ def show(parent, port, enabled=True):
 
 def show_qr(parent, port):
     """A small window with nothing but the QR code for the web view address."""
+    existing = _reuse("qr")
+    if existing is not None:
+        return existing
     url = mobile_server.mobile_url(port)
     win = tk.Toplevel(parent)
+    _open["qr"] = win
     win.title("LycRomanise - QR code")
     win.configure(bg="#ffffff")
     win.attributes("-topmost", True)

@@ -64,7 +64,7 @@ def load_icon_image(path=None, size=64):
 
 def menu_spec(is_locked, autostart_on, mobile_on=False, can_autostart=True):
     """Pure description of the tray menu: [(label, action_name, checked)] with
-    None as a separator. Kept separate from pystray so it can be tested."""
+    None as a separator. Kept separate from pystray so the menu is described in one place."""
     from version import __version__
     spec = [
         ("LycRomanise v%s" % __version__, "about", None),

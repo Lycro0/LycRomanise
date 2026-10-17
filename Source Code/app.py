@@ -23,12 +23,10 @@ import tkinter.font as tkfont
 import config
 import layout
 import tray
-import winddiag
 import winsys
 import drawing
 from drawing import (TextMeter, _draw_outline_only, _draw_outlined_text, _ease_out_cubic, _lerp_rgb,
                      _rgb_to_hex)
-from selftest import run_selftest
 import song_offsets
 import lyrics_provider
 from lyrics_provider import fetch_lyrics, forget as forget_lyrics, is_non_song, outage_since
@@ -39,9 +37,9 @@ import update_dialog
 import mobile_server
 import nowplaying
 
-log = logging.getLogger("lycro.app")
-
 from version import __version__, RELEASES_URL
+
+log = logging.getLogger("lycro.app")
 
 
 def _safe(fn, *args):
@@ -50,6 +48,8 @@ def _safe(fn, *args):
         fn(*args)
     except tk.TclError:
         pass
+
+
 APP_NAME = "LycRomanise v%s" % __version__
 
 # --- polling ---------------------------------------------------------------
@@ -229,7 +229,6 @@ class LyricsApp:
         self._banner = None              # {"text", "until"}: version / update line, drawn over the lyrics too
         self._hover_since = 0.0
         self._meter = TextMeter()      # remembered text widths: the strip is redrawn 50 times a second
-        self._show_border = False
         self._last_scene_sig = None
         self._last_full_redraw = 0.0
         self._settings_window = None
@@ -262,21 +261,15 @@ class LyricsApp:
         self._sync_now_playing(grace=True)
         self._update_release = None
         self._update_win = None
-        if not os.environ.get("SPOTI_SELFTEST"):
-            self._set_banner("LycRomanise v%s" % __version__, VERSION_BANNER_S)
-            if config.check_updates_enabled():
-                self.root.after(1500, lambda: self.check_for_update(manual=False))
+        self._set_banner("LycRomanise v%s" % __version__, VERSION_BANNER_S)
+        if config.check_updates_enabled():
+            self.root.after(1500, lambda: self.check_for_update(manual=False))
 
     # -------------------------------------------------------- media reader --
 
     def _connect_player(self):
         """Start reading what is playing from the Windows media controls.
         Returns True when the reader is running."""
-        if os.environ.get("SPOTI_SELFTEST"):
-            # --selftest feeds the strip a demo song; a real poll would replace it with
-            # whatever is (or is not) playing and empty the strip.
-            log.info("selftest: polling is off")
-            return False
         try:
             self.player = MediaClient()
         except Exception as exc:
@@ -499,7 +492,6 @@ class LyricsApp:
         # on every ~40ms redraw would leak Tcl font resources.
         self._desktop_top_font = tkfont.Font(family="Segoe UI", size=self.desktop_curr_size, weight="bold")
         self._desktop_next_font = tkfont.Font(family="Segoe UI", size=self.desktop_next_size)
-        self._measure_font = tkfont.Font(family="Segoe UI", size=self.desktop_curr_size, weight="bold")
 
         self._alpha = None
         if sys.platform.startswith("win"):
@@ -764,6 +756,7 @@ class LyricsApp:
                 except tk.TclError:
                     self._update_win = None
             win = tk.Toplevel(self.root)
+            self._update_win = win               # so a failure below can still close it
             win.attributes("-topmost", True)
             tag = release["tag"]
             dlg = update_dialog.UpdateDialog(
@@ -773,7 +766,6 @@ class LyricsApp:
                 on_skip=lambda: (updater.skip_version(tag), self._close_update_win()),
                 on_open_page=lambda: winsys.open_url(release["url"]))
             win.protocol("WM_DELETE_WINDOW", self._close_update_win)
-            self._update_win = win
             # centre on the screen the strip is on
             win.update_idletasks()
             x = max(0, (win.winfo_screenwidth() - win.winfo_reqwidth()) // 2)
@@ -782,6 +774,7 @@ class LyricsApp:
             win.focus_force()
         except Exception:
             log.exception("couldn't open the update window")
+            self._close_update_win()
             self._set_notice("Couldn't open the update window - see the log", "error", seconds=8)
             winsys.open_url(release["url"])
 
@@ -840,15 +833,17 @@ class LyricsApp:
                     self._settings_window = None
             import config_editor
             win = tk.Toplevel(self.root)
+            self._settings_window = win        # so a failure below can still close it
             win.withdraw()                     # stays hidden while it is built, then appears at its final size
             win.attributes("-topmost", True)   # the strip is topmost too; stay above it
             config_editor.ConfigEditor(win, on_apply=self.reload_appearance, on_reset_position=self.reset_position,
                                        timing=self)
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(win))
-            self._settings_window = win
             win.focus_force()
         except Exception:
             log.exception("couldn't open settings")
+            if self._settings_window is not None:
+                self._close_settings(self._settings_window)
             self._set_notice("Couldn't open settings - see the log", "error", seconds=8)
 
     def _close_settings(self, win):
@@ -929,22 +924,15 @@ class LyricsApp:
 
     def _apply_lock_state(self, restyle=True):
         self._draw_lock_glyph()
-        self._show_border = False      # the frame only ever shows on hover while unlocked
         if restyle:
             self._set_windows_clickthrough(self.desktop_locked)
         self._reposition_lock_icon()
         self._refresh_tray()
-        if restyle and sys.platform.startswith("win") and winsys.env_flag("SPOTI_DEBUG_DIAGNOSTICS"):
-            self._log_window_diagnostics("lock %s" % ("on" if self.desktop_locked else "off"))
 
     def _schedule_startup_window_work(self):
-        """Once the window is really mapped: apply a restored lock, then log the
-        window diagnostics once (~2 s; more with SPOTI_DEBUG_DIAGNOSTICS=1)."""
+        """Once the window is really mapped, apply a restored lock."""
         self._startup_styled = False
         self.root.after(200, self._startup_when_mapped)
-        self.root.after(2000, lambda: self._log_window_diagnostics("2 s after start"))
-        if winsys.env_flag("SPOTI_DEBUG_DIAGNOSTICS"):
-            self.root.after(6000, lambda: self._log_window_diagnostics("6 s after start"))
 
     def _startup_when_mapped(self, tries=0):
         if self._startup_styled:
@@ -965,11 +953,6 @@ class LyricsApp:
     def _set_windows_clickthrough(self, enabled):
         if not sys.platform.startswith("win"):
             return
-        if winsys.env_flag("SPOTI_DEBUG_NO_CLICKTHROUGH"):
-            if not getattr(self, "_warned_no_ct", False):
-                self._warned_no_ct = True
-                log.warning("SPOTI_DEBUG_NO_CLICKTHROUGH set: window styles are left alone")
-            return
         try:
             self.root.update_idletasks()
             info = winsys.set_clickthrough(self.root.winfo_id(), enabled)
@@ -986,8 +969,7 @@ class LyricsApp:
         """Ask Windows for a repaint (no erase). -transparentcolor is a hard
         chroma key, not real alpha, so the compositor can otherwise leave
         stale glyph pixels behind when text changes or disappears."""
-        if not sys.platform.startswith("win") or winsys.env_flag("SPOTI_DEBUG_NO_INVALIDATE") \
-                or self._alpha is not None:          # the alpha strip is pushed whole every frame
+        if not sys.platform.startswith("win") or self._alpha is not None:   # the alpha strip is pushed whole every frame
             return
         try:
             winsys.invalidate(self.root.winfo_id())
@@ -995,15 +977,6 @@ class LyricsApp:
             if not getattr(self, "_warned_redraw", False):
                 self._warned_redraw = True
                 log.warning("window repaint request failed (logged once): %s", exc)
-
-    def _lyric_colour_targets(self):
-        return [tuple(KARAOKE_UNSUNG_RGB), tuple(KARAOKE_SUNG_RGB), tuple(DESKTOP_NEXT_RGB)]
-
-    def _count_lyric_pixels(self):
-        return winddiag.count_lyric_pixels(self, self._lyric_colour_targets())
-
-    def _log_window_diagnostics(self, reason):
-        winddiag.log_window_diagnostics(self, reason, self._lyric_colour_targets())
 
     def _enable_transparency(self):
         """See-through background is a Windows-only tkinter trick; elsewhere
@@ -1217,6 +1190,10 @@ class LyricsApp:
             self._picker = picker
         except Exception:
             log.exception("couldn't open the wrong-lyrics window")
+            try:
+                win.destroy()
+            except (NameError, tk.TclError):
+                pass
             self._picker = None
             self._set_banner("Couldn't open the lyrics list", 3.0)
             return
@@ -1569,15 +1546,16 @@ class LyricsApp:
                 if now_p >= self._mobile_next_publish:
                     self._mobile_next_publish = now_p + MOBILE_PUBLISH_S
                     self._mobile.publish(self._mobile_state())
-            # Full Windows repaint only when what's shown changed (or every
-            # REDRAW_KEEPALIVE_S): invalidating with erase every 40 ms flickers.
-            sig = (self._scene(), bool(self.desktop_locked), (self._active_notice() or {}).get("text"),
-                   (self._active_banner() or {}).get("text"))
-            now = time.perf_counter()
-            if sig != self._last_scene_sig or now - self._last_full_redraw > REDRAW_KEEPALIVE_S:
-                self._last_scene_sig = sig
-                self._last_full_redraw = now
-                self._force_windows_redraw()
+            if self._alpha is None and sys.platform.startswith("win"):
+                # Colour-key strip only: a full Windows repaint when what's shown changed (or every
+                # REDRAW_KEEPALIVE_S). Invalidating with erase every few ms flickers.
+                sig = (self._scene(), bool(self.desktop_locked), (self._active_notice() or {}).get("text"),
+                       (self._active_banner() or {}).get("text"))
+                now = time.perf_counter()
+                if sig != self._last_scene_sig or now - self._last_full_redraw > REDRAW_KEEPALIVE_S:
+                    self._last_scene_sig = sig
+                    self._last_full_redraw = now
+                    self._force_windows_redraw()
         except Exception:
             # canvas.delete("all") has already wiped the old frame, so an
             # uncaught error here would freeze the strip on stale content.
@@ -1631,7 +1609,6 @@ class LyricsApp:
         if over:
             self._hover_since = now
         show = over or (now - self._hover_since) < HOVER_HIDE_DELAY_S
-        self._show_border = bool(show and not self.desktop_locked)
         if show and not self._lock_icon_allowed():
             show = False                 # the padlock is switched off in Settings
 
@@ -1866,8 +1843,6 @@ class LyricsApp:
             canvas.create_text(x, y, text=ch, font=font, fill=color, anchor="nw")
 
 def main():
-    if "--selftest" in sys.argv[1:]:
-        sys.exit(run_selftest())
     # Started from a console (python app.py, run.bat, a terminal)? Hand over
     # to a console-less copy and let this one exit, so closing that console
     # can never take the strip down with it.
@@ -1880,11 +1855,7 @@ def main():
         _load_appearance()
     winsys.migrate_legacy_autostart()   # v1.5.0: the old entry had a different name
     winsys.refresh_autostart()          # keep the Run entry pointing at where the app is now
-    if winsys.env_flag("SPOTI_DEBUG_NO_DPI"):
-        dpi = None
-        log.warning("SPOTI_DEBUG_NO_DPI set: not enabling DPI awareness")
-    else:
-        dpi = winsys.enable_dpi_awareness()  # before the first Tk window, or it has no effect
+    dpi = winsys.enable_dpi_awareness()      # before the first Tk window, or it has no effect
     if dpi:
         log.info("DPI awareness: %s", dpi)
     root = tk.Tk()

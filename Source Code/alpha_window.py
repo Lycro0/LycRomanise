@@ -21,7 +21,6 @@ try:
 except Exception:                      # Pillow missing: the feature is simply unavailable
     Image = ImageDraw = ImageFont = None
 
-OUTLINE_RGBA = (1, 1, 1, 255)
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
 WS_POPUP = 0x80000000

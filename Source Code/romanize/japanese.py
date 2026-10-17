@@ -52,10 +52,27 @@ _SINGLE_RE = re.compile(
 )
 
 
-def _apply_readings(text):
-    """Swap the words/kanji above for kana so pykakasi reads them the way a song does."""
-    text = _WORDS_RE.sub(lambda m: _WORDS[m.group(0)], text)
-    return _SINGLE_RE.sub(lambda m: _SINGLE[m.group(1)], text)
+def _split_readings(text):
+    """Cut `text` at the words / lone kanji listed above: [(piece, kana_reading_or_None)]. A piece with a
+    reading is read as that kana; the others go to pykakasi as they are. Keeping them apart matters: if
+    the kana were swapped into the sentence, it would turn into one long hiragana run that pykakasi
+    reads as a single word, and the spaces and the particle fixes would be lost (今日は -> "kyouha")."""
+    hits = []
+    for m in _WORDS_RE.finditer(text):
+        hits.append((m.start(), m.end(), _WORDS[m.group(0)]))
+    for m in _SINGLE_RE.finditer(text):
+        if not any(a < m.end() and m.start() < b for a, b, _ in hits):      # words win over lone kanji
+            hits.append((m.start(), m.end(), _SINGLE[m.group(1)]))
+    hits.sort()
+    pieces, pos = [], 0
+    for start, end, kana in hits:
+        if start > pos:
+            pieces.append((text[pos:start], None))
+        pieces.append((text[start:end], kana))
+        pos = end
+    if pos < len(text):
+        pieces.append((text[pos:], None))
+    return pieces
 
 
 def _hepburn(text):
@@ -93,19 +110,46 @@ def _long_vowels(orig, hep):
     return hep
 
 
-def romanize(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text)
-    text = _apply_readings(text)
+def _unknown_reading(orig):
+    """What to show for characters pykakasi returns nothing for: the pinyin reading for Han characters
+    (a Chinese line that was taken for Japanese), nothing for anything else."""
+    if not orig.strip() or not re.search("[%s]" % _KANJI, orig):
+        return ""
+    try:
+        from . import chinese
+        return chinese.romanize(orig)
+    except ImportError:                              # pypinyin isn't installed
+        return ""
+
+
+def _romanize_piece(text):
+    """pykakasi plus the particle and long-vowel fixes, for text that has no forced readings in it."""
     parts = []
     for item in _kks.convert(text):
         orig = item.get("orig", "") or ""
         piece = item.get("hepburn", "")
         if not piece:
-            continue
-        if _HIRAGANA_RUN_RE.match(orig):
+            piece = _unknown_reading(orig)      # e.g. simplified Chinese characters pykakasi has no reading for
+            if not piece:
+                continue
+        elif _HIRAGANA_RUN_RE.match(orig):
             piece = _fix_run(orig, piece)
-        piece = _long_vowels(orig, piece)
+        if piece and orig:
+            piece = _long_vowels(orig, piece)
         if parts and not _PUNCT_ONLY_RE.match(orig):
             parts.append(" ")
         parts.append(piece)
     return "".join(parts)
+
+
+def romanize(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    out = []
+    for piece, kana in _split_readings(text):
+        reading = _romanize_piece(kana or piece)
+        if not reading:
+            continue
+        if out and not _PUNCT_ONLY_RE.match(piece) and not out[-1].endswith(" "):
+            out.append(" ")
+        out.append(reading)
+    return re.sub(r" {2,}", " ", "".join(out))

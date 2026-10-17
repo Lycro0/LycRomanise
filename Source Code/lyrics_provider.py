@@ -966,11 +966,11 @@ SOURCE_WAIT_S = 12.0
 
 
 def _fetch_uncached(key, track_name, artist_name, album_name, duration_ms):
+    global _last_outage
     started = time.monotonic()
     asked_any = False
     for name, lookup in _sources():
         if source_paused(name):
-            global _last_outage
             _last_outage = time.monotonic()
             log.info("source %s is paused after repeated failures, not asked for %r", name, track_name)
             continue

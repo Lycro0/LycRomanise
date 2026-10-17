@@ -1,4 +1,4 @@
-# LycRomanise: full details (v1.8.0)
+# LycRomanise: full details (v1.8.1)
 
 The short version is in [README.md](README.md). This page has everything else.
 
@@ -172,6 +172,7 @@ When installed, settings, cache and logs are in `%LOCALAPPDATA%\LycRomanise`. Fr
 | `window_state.json` | strip position and lock state |
 | `config.json` | optional: `"check_updates": false` turns the update check off; `"extra_players"`, `"lyrics_folders"`, `"extra_lyrics_apis"` and `"now_playing_path"` (see above) |
 | `lyrics_cache.json` | cached lyrics |
+| `song_offsets.json` | the timing tweaks you made per song |
 | `provider_health.json` | lyrics source outage state |
 | `logs/lycromanise.log` | everything, rotating daily, 14 days kept |
 | `logs/crash-native.log` | hard interpreter crashes (a few lines about a thread are harmless; see Troubleshooting) |
@@ -193,6 +194,8 @@ config_editor.py    Settings window
 updater.py          GitHub update check and install
 update_dialog.py    the update window
 lyrics_picker.py    the "Wrong lyrics?" window
+mobile_server.py    the built-in web view (phones, tablets, OBS browser source)
+mobile_dialog.py    the web view address and QR code windows
 song_offsets.py     per-song timing offsets
 tray.py             tray icon and menu
 winsys.py           single instance, start with Windows, DPI, click-through
@@ -201,8 +204,6 @@ version.py          app version
 layout.py           line splitting and karaoke fill
 drawing.py          colors and outlined text
 applog.py           file logging and crash capture
-selftest.py         the --selftest check
-winddiag.py         window diagnostics
 romanize/           korean.py, japanese.py, chinese.py, others.py, detect.py
 assets/             lyrics-overlay.ico
 ```
@@ -231,21 +232,12 @@ assets/             lyrics-overlay.ico
 
 ## Troubleshooting
 
-**Check the strip is drawing:** `python app.py --selftest` builds the strip with a demo song and
-writes one line to `logs/selftest-result.txt`. `SELFTEST PASS ... lyric_pixels_on_screen=N` with N > 0
-means the text is on your screen. `SELFTEST FAIL` gives the reason.
+**Strip invisible or in the wrong place:** use *Reset lyrics position* in Settings > Window, and make sure the
+tray icon shows the strip is unlocked. If it still doesn't appear, look at `logs/lycromanise.log` for lines about
+"true transparency". If that fails, the app switches to the plain strip by itself.
 
-**Strip invisible:** about 2 s after start the app writes a `window diagnostics (...)` line to the
-log, with a count of lyric pixels on screen. N > 0 with a song playing means the text is visible. To
-find which piece breaks on your machine, set one of these before starting:
-
-| variable | effect |
-| --- | --- |
-| `SPOTI_DEBUG_NO_CLICKTHROUGH=1` | never touches the window's extended styles (lock only stops dragging) |
-| `SPOTI_DEBUG_NO_INVALIDATE=1` | never asks Windows for repaints |
-| `SPOTI_DEBUG_NO_DPI=1` | does not enable DPI awareness |
-| `SPOTI_DEBUG_DIAGNOSTICS=1` | logs the diagnostics line again at 6 s and on lock toggles |
-| `SPOTI_NO_DETACH=1` | keeps the app attached to the terminal (output still goes only to the log) |
+**Started from a terminal:** `python app.py` hands over to a console-less copy and exits. Set
+`SPOTI_NO_DETACH=1` to keep it attached to the terminal (output still goes only to the log).
 
 **A player isn't picked up:** the log line `no supported player among the Windows media sessions: [...]`
 lists what Windows is showing, and `reading playback from media session ...` names the one in use. If

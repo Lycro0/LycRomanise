@@ -5,8 +5,7 @@ not the song's words: a "no lyrics / pure music" placeholder, a Chinese translat
 instead of the original, or the lyrics of a longer edition. Romanized, those come out
 as pinyin for a Korean or English song. Showing nothing beats showing the wrong song.
 
-Everything here is pure (no network, no GUI) so it can be tested directly.
-Decisions are returned as notes and logged by the caller.
+Everything here is pure (no network, no GUI). Decisions are returned as notes and logged by the caller.
 
 The checks, in order:
   1. Placeholders ("纯音乐，请欣赏", "instrumental", ...) are thrown away.
@@ -38,7 +37,7 @@ OVERRUN_S = 8.0
 PRESENT_SHARE = 0.25
 
 class Candidate:
-    """The lyrics under test."""
+    """The lyrics being checked."""
     __slots__ = ("synced", "profile", "main")
 
     def __init__(self, synced):

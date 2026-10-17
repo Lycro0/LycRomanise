@@ -2,6 +2,14 @@
 
 Synced lyrics on your desktop for whatever is playing on Spotify or Apple Music, with **romanized lyrics** for Korean, Japanese and Chinese songs.
 
+<p align="center">
+  <a href="Source%20Code/assets/LycRomanise-Preview.mp4">
+    <img src="Source%20Code/assets/LycRomanise-Preview.gif" alt="LycRomanise showing synced, romanized lyrics on the desktop" width="100%">
+  </a>
+  <br>
+  <sub>Click the preview to watch it as a video.</sub>
+</p>
+
 ## Download
 
 Get **LycRomanise_Setup.exe** (installer) or **LycRomanise.exe** (portable) from the [Releases](https://github.com/Lycro0/LycRomanise/releases) page. No account or API key needed.
