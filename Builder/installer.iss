@@ -3,7 +3,7 @@
 ; The AppId is the same as v1.x, so installing v2 upgrades an existing install in place.
 #define AppName "LycRomanise"
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.0.1"
 #endif
 
 [Setup]
@@ -65,6 +65,47 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM LycRomanise.exe"; Flags: 
 function RelaunchRequested: Boolean;
 begin
   Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
+{ v1 could be installed for all users (Program Files (x86), 32-bit registry). v2 installs per user, so
+  Inno does not see that copy as the same install: once v2 is in place, uninstall the old one so there
+  are not two. Windows asks for permission, as removing it needs admin rights. }
+const
+  LegacyKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B7C2F1A4-5D3E-4E8A-9F61-0A1B2C3D4E5F}_is1';
+
+procedure RemoveLegacyInstall;
+var
+  Uninstaller, Location: String;
+  ResultCode: Integer;
+begin
+  if not RegQueryStringValue(HKLM32, LegacyKey, 'UninstallString', Uninstaller) then Exit;
+  RegQueryStringValue(HKLM32, LegacyKey, 'InstallLocation', Location);
+  if CompareText(RemoveBackslash(Location), RemoveBackslash(ExpandConstant('{app}'))) = 0 then Exit;
+  Uninstaller := RemoveQuotes(Uninstaller);
+  if not FileExists(Uninstaller) then Exit;
+  Log('Removing the all-users LycRomanise 1.x install at ' + Location);
+  ShellExec('runas', Uninstaller, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ v1 started with Windows under the value "LycRomanise"; keep that choice, pointing at v2. }
+procedure MoveLegacyAutostart;
+var
+  Old: String;
+begin
+  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise', Old) then
+  begin
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise');
+    RegWriteStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise Modern', '"' + ExpandConstant('{app}\LycRomanise.exe') + '"');
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    MoveLegacyAutostart;
+    RemoveLegacyInstall;
+  end;
 end;
 
 { A running LycRomanise.exe can't be replaced, so close every copy first. }

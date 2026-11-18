@@ -67,7 +67,8 @@ public sealed class AppController : IDisposable
         if (Settings.WebEnabled) Web.Start(Settings.WebPort);
         IpcSignal.Listen(() => _ui.BeginInvoke(ShowSettings));
         IpcSignal.Listen(() => _ui.BeginInvoke(ShowLyricsWindow), IpcSignal.Lyrics);
-        Autostart.Apply(Settings.StartWithWindows);
+        // Windows' own Run entry is the truth (the installer may have set it), not the saved setting.
+        Settings.StartWithWindows = Autostart.IsOn();
         if (openSettings) ShowSettings();
         if (Spotify.LoggedIn) _ = Spotify.LoadProfileAsync(CancellationToken.None);
         ApplyHotkeys();
@@ -523,6 +524,16 @@ public sealed class AppController : IDisposable
 public static class Autostart
 {
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    public static bool IsOn()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey);
+            return key?.GetValue("LycRomanise Modern") != null;
+        }
+        catch { return false; }
+    }
+
     public static void Apply(bool on)
     {
         try
