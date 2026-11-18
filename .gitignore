@@ -1,9 +1,6 @@
-__pycache__/
-*.pyc
-appearance.json
-window_state.json
-lyrics_cache.json
-provider_health.json
-settings_reset_*.flag
-config.json
-logs/
+bin/
+obj/
+App/
+*.user
+.vs/
+release-notes.md

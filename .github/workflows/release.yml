@@ -1,0 +1,68 @@
+# Builds LycRomanise and publishes a GitHub release whenever a version tag (v2.0.0, v2.1.0, ...) is pushed.
+# The release gets the portable LycRomanise.exe and the LycRomanise_Setup.exe installer, which is
+# what the app's own update check downloads. Notes come from "Release Notes/v<version>.md".
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v2.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ github.event.inputs.tag }}" } else { "${{ github.ref_name }}" }
+          $version = $tag.TrimStart("v")
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build the app
+        shell: pwsh
+        run: >
+          dotnet publish "Source Code/LycRomanise/LycRomanise.csproj" -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
+          -p:DebugType=none -p:Version=${{ steps.ver.outputs.version }} -o App
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" "Builder\installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $file = "Release Notes/${{ steps.ver.outputs.tag }}.md"
+          if (-not (Test-Path $file)) { "LycRomanise ${{ steps.ver.outputs.tag }}" | Set-Content release-notes.md; $file = "release-notes.md" }
+          "file=$file" >> $env:GITHUB_OUTPUT
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: LycRomanise ${{ steps.ver.outputs.tag }}
+          body_path: ${{ steps.notes.outputs.file }}
+          files: |
+            App/LycRomanise_Setup.exe
+            App/LycRomanise.exe
+          make_latest: true
