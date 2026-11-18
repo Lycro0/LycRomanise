@@ -32,6 +32,8 @@ public partial class App : Application
         _controller = new AppController();
         _controller.Start(openSettings: e.Args.Contains("--settings"));
         if (e.Args.Contains("--lyrics")) _controller.ShowLyricsWindow();
+        int demo = Array.IndexOf(e.Args, "--demo-looks");
+        if (demo >= 0) _ = _controller.DemoLooksAsync(demo + 1 < e.Args.Length && double.TryParse(e.Args[demo + 1], out var sec) ? sec : 8);
     }
 
     async Task Probe(string artist, string title, int seconds, string outPath)

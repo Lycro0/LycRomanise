@@ -4,79 +4,129 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0b10">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>LycRomanise</title>
 <style>
-  :root { --unsung:#ffe14d; --sung:#ff3d9a; --next:#ffe14d; --outline:#000; --sub:#ffffffe6; }
+  :root { --dim: rgba(255,255,255,.38); --lift: 2.5px; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
-  body {
-    background: radial-gradient(120% 90% at 50% 0%, #1d1830 0%, #0b0b10 60%);
-    color: #fff; font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Noto Sans CJK", sans-serif;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden;
-    -webkit-font-smoothing: antialiased;
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0b10; color: #fff;
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "SF Pro Display", "Hiragino Sans", "Noto Sans CJK JP", "Malgun Gothic", sans-serif;
+    -webkit-font-smoothing: antialiased; }
+
+  /* The cover, blurred and drifting behind everything. */
+  #bg { position: fixed; inset: -25%; z-index: 0; background: linear-gradient(135deg, #3b1f4f, #7a1f4f 55%, #2a1830);
+        transition: opacity 1s; }
+  #bg .art { position: absolute; inset: 0; background-size: cover; background-position: center;
+             filter: blur(90px) saturate(1.5); opacity: 0; transition: opacity 1.2s; }
+  #bg .art.on { opacity: .95; }
+  #bg .a1 { animation: drift 46s ease-in-out infinite alternate; }
+  #bg .a2 { animation: drift2 60s ease-in-out infinite alternate; mix-blend-mode: screen; opacity: 0; }
+  #bg .a2.on { opacity: .45; }
+  @keyframes drift  { from { transform: scale(1.05) rotate(-6deg); } to { transform: scale(1.3) rotate(8deg); } }
+  @keyframes drift2 { from { transform: scale(1.4) rotate(12deg) translate(4%, -3%); } to { transform: scale(1.1) rotate(-10deg) translate(-4%, 3%); } }
+  #shade { position: fixed; inset: 0; z-index: 1; background: linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,.72)); }
+
+  #app { position: relative; z-index: 2; height: 100%; display: grid; grid-template-columns: minmax(300px, .82fr) 1.18fr; }
+  #player { display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 40px 24px 40px 48px; }
+  #player .inner { width: min(400px, 34vw); }
+  #cover { width: 100%; aspect-ratio: 1; border-radius: 14px; background: rgba(255,255,255,.12) center/cover;
+           box-shadow: 0 24px 60px rgba(0,0,0,.45); }
+  #title { margin-top: 26px; font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #artist { margin-top: 2px; font-size: 18px; color: rgba(255,255,255,.7); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #bar { margin-top: 18px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; }
+  #fill { height: 100%; width: 0; background: rgba(255,255,255,.9); border-radius: 3px; }
+  #times { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: rgba(255,255,255,.6); font-variant-numeric: tabular-nums; }
+  #credit { margin-top: 18px; font-size: 11px; color: rgba(255,255,255,.5); }
+
+  #lyrics { position: relative; overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10%, #000 86%, transparent 100%);
+            mask-image: linear-gradient(180deg, transparent 0, #000 10%, #000 86%, transparent 100%); }
+  #column { position: absolute; left: 0; right: 0; top: 0; padding: 0 6vw 60vh 2vw; }
+  .line { font-weight: 800; font-size: clamp(26px, 3.1vw, 46px); line-height: 1.18; margin: 0 0 .95em;
+          color: var(--dim); transform-origin: left center; transform: scale(.965);
+          transition: transform .55s cubic-bezier(.2,.8,.2,1), opacity .5s, filter .5s; filter: blur(.6px); }
+  .line.trailing { text-align: right; transform-origin: right center; }
+  .line.active { transform: none; filter: none; }
+  .line.past, .line.future { opacity: .9; }
+  .line .sub { display: block; font-size: .52em; font-weight: 600; margin-top: .25em; }
+  .line .bg  { display: block; font-size: .6em; font-weight: 600; margin-top: .2em; }
+  .line .tr  { display: block; font-size: .5em; font-weight: 600; margin-top: .3em; color: rgba(255,255,255,.35); }
+  .w { display: inline-block; white-space: pre; transition: transform .45s cubic-bezier(.2,.8,.2,1);
+       background: linear-gradient(90deg, #fff var(--p), var(--dim) calc(var(--p) + 10%));
+       -webkit-background-clip: text; background-clip: text; color: transparent; --p: -10%; }
+  .line:not(.active) .w { background: none; color: var(--dim); --p: -10%; }
+  .line.active .w.sung { transform: translateY(calc(var(--lift) * -1)); text-shadow: 0 0 calc(var(--glow, .5) * 18px) rgba(255,255,255,.35); }
+  .unsynced .line { color: rgba(255,255,255,.85); filter: none; transform: none; }
+  .dots { display: flex; gap: .5em; height: 1.1em; align-items: center; }
+  .dots i { width: .38em; height: .38em; border-radius: 50%; background: rgba(255,255,255,.35); transition: background .3s, transform .3s; }
+  .dots.live i { animation: breathe 1.3s ease-in-out infinite; }
+  @keyframes breathe { 50% { transform: scale(1.18); } }
+  #empty { position: absolute; top: 38%; left: 2vw; right: 6vw; font-size: clamp(22px, 2.4vw, 34px); font-weight: 700; color: rgba(255,255,255,.55); }
+
+  /* Phones: the player shrinks to a header and the lyrics take the screen. */
+  @media (max-width: 820px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    #player { flex-direction: row; justify-content: flex-start; padding: max(18px, env(safe-area-inset-top)) 20px 8px; }
+    #player .inner { width: 100%; display: grid; grid-template-columns: 64px 1fr; column-gap: 14px; align-items: center; }
+    #cover { width: 64px; border-radius: 8px; grid-row: span 2; box-shadow: 0 8px 20px rgba(0,0,0,.4); }
+    #title { margin: 0; font-size: 17px; } #artist { font-size: 14px; }
+    #bar, #times, #credit { display: none; }
+    #column { padding: 0 22px 60vh; }
+    .line { font-size: clamp(24px, 7vw, 34px); }
   }
-  body.obs { background: transparent; }
-  header { position: fixed; top: 0; left: 0; right: 0; padding: 18px 22px; opacity: .75; font-size: 14px; }
-  header b { display: block; font-size: 16px; }
-  body.obs header, body.obs footer { display: none; }
-  #stage { width: min(1100px, 94vw); text-align: center; }
-  .line { font-weight: 800; font-size: clamp(26px, 6vw, 64px); line-height: 1.25; margin: 0; transition: transform .32s cubic-bezier(.2,.8,.2,1), opacity .32s; }
-  .sub { font-weight: 600; font-size: clamp(16px, 3.4vw, 36px); line-height: 1.3; margin-top: 6px; }
-  .tr { font-size: clamp(14px, 2.6vw, 26px); opacity: .8; margin-top: 6px; color: var(--sub); }
-  .bg { font-size: clamp(13px, 2.6vw, 26px); font-style: italic; opacity: .85; margin-top: 4px; }
-  .next { font-weight: 700; font-size: clamp(16px, 3.6vw, 34px); color: var(--next); opacity: .5; margin-top: 26px; }
-  .trailing { text-align: right; } .leading.duet { text-align: left; }
-  .w { -webkit-text-stroke: 0; paint-order: stroke fill;
-       text-shadow: 0 0 2px var(--outline), 0 0 3px var(--outline), 0 0 12px rgba(0,0,0,.45);
-       background: linear-gradient(90deg, var(--sung) var(--p), var(--unsung) calc(var(--p) + 6%));
-       -webkit-background-clip: text; background-clip: text; color: transparent; --p: -6%; }
-  .sub .w { background: linear-gradient(90deg, var(--sung) var(--p), var(--sub) calc(var(--p) + 6%)); -webkit-background-clip: text; background-clip: text; }
-  .dots span { display: inline-block; width: .5em; height: .5em; border-radius: 50%; margin: 0 .35em; background: var(--unsung); opacity: .4; animation: breathe 1.25s ease-in-out infinite; }
-  @keyframes breathe { 50% { transform: scale(1.15); } }
-  .title { font-size: clamp(20px, 4.6vw, 44px); font-weight: 700; color: var(--unsung); }
-  footer { position: fixed; bottom: 10px; font-size: 11px; opacity: .45; }
-  .enter { animation: rise .32s cubic-bezier(.2,.8,.2,1); }
-  @keyframes rise { from { transform: translateY(28px); opacity: .2; } to { transform: none; opacity: 1; } }
 </style>
 </head>
 <body>
-<header><b id="song"></b><span id="artist"></span></header>
-<div id="stage"></div>
-<footer id="credit"></footer>
+<div id="bg"><div class="art a1"></div><div class="art a2"></div></div>
+<div id="shade"></div>
+<div id="app">
+  <div id="player"><div class="inner">
+    <div id="cover"></div>
+    <div id="title">Waiting for music…</div>
+    <div id="artist"></div>
+    <div id="bar"><div id="fill"></div></div>
+    <div id="times"><span id="el"></span><span id="rem"></span></div>
+    <div id="credit"></div>
+  </div></div>
+  <div id="lyrics"><div id="column"></div><div id="empty"></div></div>
+</div>
 <script>
-const obs = new URLSearchParams(location.search).has("obs");
-if (obs) document.body.classList.add("obs");
-let state = null, stateAt = 0, lyrics = { lines: [] }, version = -1, shown = -3, duet = false;
-const stage = document.getElementById("stage");
+const $ = id => document.getElementById(id);
+let state = null, stateAt = 0, lyrics = { lines: [] }, version = -1, coverVer = -1;
+let rows = [], active = -2, scroll = 0, userUntil = 0, userScroll = 0;
+const MOTION = { AppleMusic: [2.5, .5, .06], Glow: [1.5, 1, .06], Float: [7, .5, .09], Calm: [0, 0, 0], Snappy: [2, .3, .015] };
 
 async function poll() {
   try {
     const s = await (await fetch("/state", { cache: "no-store" })).json();
     state = s; stateAt = performance.now();
-    const r = document.documentElement.style;
-    r.setProperty("--unsung", s.colors.unsung); r.setProperty("--sung", s.colors.sung);
-    r.setProperty("--next", s.colors.next); r.setProperty("--outline", s.colors.outline);
-    r.setProperty("--sub", s.colors.sub);
-    document.getElementById("song").textContent = s.title || "";
-    document.getElementById("artist").textContent = s.artist || "";
+    $("title").textContent = s.title || "Waiting for music…";
+    $("artist").textContent = s.artist || "";
+    document.title = s.title ? `${s.title} · ${s.artist} — LycRomanise` : "LycRomanise";
+    const m = MOTION[s.motion] || MOTION.AppleMusic;
+    document.documentElement.style.setProperty("--lift", m[0] + "px");
+    document.documentElement.style.setProperty("--glow", m[1]);
+    window.stagger = m[2];
+    if (s.cover !== coverVer) {
+      coverVer = s.cover;
+      const url = s.cover ? `/cover?v=${s.cover}` : "";
+      $("cover").style.backgroundImage = url ? `url(${url})` : "";
+      document.querySelectorAll("#bg .art").forEach(a => { a.style.backgroundImage = url ? `url(${url})` : ""; a.classList.toggle("on", !!url); });
+    }
     if (s.v !== version) {
       lyrics = await (await fetch("/lyrics", { cache: "no-store" })).json();
-      version = s.v; shown = -3;
-      duet = lyrics.lines.some(l => l.a);
-      document.getElementById("credit").textContent = lyrics.credit ? "Lyrics: " + lyrics.credit : "";
+      version = s.v;
+      build();
     }
   } catch (e) { }
   setTimeout(poll, 1000);
 }
 
-function now() {
-  if (!state) return 0;
-  return state.playing ? state.pos + (performance.now() - stateAt) : state.pos;
-}
+function now() { return !state ? 0 : state.playing ? state.pos + (performance.now() - stateAt) : state.pos; }
+function clock(ms) { ms = Math.max(0, ms) / 1000; const m = Math.floor(ms / 60), s = Math.floor(ms % 60); return `${m}:${String(s).padStart(2, "0")}`; }
 
 function words(line, cls) {
-  if (!line) return "";
-  const d = document.createElement("div");
+  const d = document.createElement("span");
   d.className = cls;
   line.w.forEach((w, i) => {
     if (i > 0 && !w.j) d.append(" ");
@@ -87,51 +137,76 @@ function words(line, cls) {
   return d;
 }
 
-function render(idx, t) {
-  stage.innerHTML = "";
+function build() {
+  const col = $("column");
+  col.innerHTML = ""; rows = []; active = -2;
+  $("credit").textContent = lyrics.credit ? "Lyrics: " + lyrics.credit : "";
+  $("lyrics").classList.toggle("unsynced", !lyrics.synced);
   const L = lyrics.lines;
-  if (!state || !state.title) { stage.innerHTML = '<div class="title">Waiting for music…</div>'; return; }
-  if (!L.length) { stage.innerHTML = `<div class="title">${esc(state.artist)} — ${esc(state.title)}</div>`; return; }
-  if (idx < 0 || idx === -2) {
-    stage.innerHTML = '<div class="line dots"><span></span><span></span><span></span></div>';
-  } else {
-    const l = L[idx];
-    const box = document.createElement("div");
-    box.className = "enter " + (l.a ? "trailing" : duet ? "leading duet" : "");
-    box.append(words(l.m, "line"));
-    if (l.sub) box.append(words(l.sub, "sub"));
-    if (l.b) box.append(words(l.b, "bg"));
-    if (l.tr && state.showTr) { const tr = document.createElement("div"); tr.className = "tr"; tr.textContent = l.tr; box.append(tr); }
-    stage.append(box);
-  }
-  const ni = idx < 0 ? 0 : idx + 1;
-  if (state.showNext && L[ni] && idx !== -2) {
-    const n = document.createElement("div");
-    n.className = "next " + (L[ni].a ? "trailing" : "");
-    n.textContent = L[ni].m.w.map((w, i) => (i > 0 && !w.j ? " " : "") + w.t).join("");
-    stage.append(n);
-  }
-}
-function esc(s) { return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]); }
-
-function frame() {
-  const t = now(), L = lyrics.lines;
-  let idx = -1;
-  if (!lyrics.synced && L.length && state && state.dur) idx = Math.min(L.length - 1, Math.floor(t / state.dur * L.length));
-  else for (let i = 0; i < L.length; i++) { if (L[i].m.s <= t) idx = i; else break; }
-  // An instrumental break shows the dots.
-  if (lyrics.synced && idx >= 0) {
-    const cur = L[idx], nx = L[idx + 1];
-    const end = Math.max(cur.m.e, cur.b ? cur.b.e : 0);
-    if (t > end + 1200 && (!nx || nx.m.s - t > 2200)) idx = nx ? -2 : idx;
-  }
-  if (idx !== shown || !stage.firstChild) { shown = idx; render(idx, t); }
-  if (lyrics.synced) {
-    for (const sp of stage.querySelectorAll(".w")) {
-      const s = +sp.dataset.s, e = +sp.dataset.e;
-      const p = t <= s ? -6 : t >= e ? 106 : (t - s) / Math.max(1, e - s) * 112 - 6;
-      sp.style.setProperty("--p", p.toFixed(1) + "%");
+  $("empty").textContent = !state || !state.title ? "Play a song to see its lyrics here." : L.length ? "" : "No lyrics for this song yet.";
+  let prevEnd = 0;
+  L.forEach((l, i) => {
+    if (lyrics.synced && l.m.s - prevEnd > 6000 && (i > 0 || l.m.s > 6000)) {
+      const d = document.createElement("div");
+      d.className = "line dots"; d.innerHTML = "<i></i><i></i><i></i>";
+      d.dataset.from = prevEnd; d.dataset.to = l.m.s;
+      col.append(d); rows.push({ el: d, start: prevEnd + 400, dots: true, from: prevEnd, to: l.m.s });
     }
+    const d = document.createElement("div");
+    d.className = "line" + (l.a ? " trailing" : "");
+    d.append(words(l.m, "main"));
+    if (l.sub) d.append(words(l.sub, "sub"));
+    if (l.b && state && state.showBacking) d.append(words(l.b, "bg"));
+    if (l.tr && state && state.showTr) { const t = document.createElement("span"); t.className = "tr"; t.textContent = l.tr; d.append(t); }
+    col.append(d);
+    rows.push({ el: d, start: l.m.s, end: Math.max(l.m.e, l.b ? l.b.e : 0), spans: [...d.querySelectorAll(".main .w, .sub .w, .bg .w")] });
+    prevEnd = Math.max(l.m.e, l.b ? l.b.e : 0);
+  });
+}
+
+$("lyrics").addEventListener("wheel", e => { userScroll = (performance.now() < userUntil ? userScroll : scroll) + e.deltaY; userUntil = performance.now() + 4000; }, { passive: true });
+let touchY = null;
+$("lyrics").addEventListener("touchstart", e => { touchY = e.touches[0].clientY; userScroll = scroll; }, { passive: true });
+$("lyrics").addEventListener("touchmove", e => { userScroll += touchY - e.touches[0].clientY; touchY = e.touches[0].clientY; userUntil = performance.now() + 4000; }, { passive: true });
+
+let last = performance.now();
+function frame(ts) {
+  const dt = Math.min(0.1, (ts - last) / 1000); last = ts;
+  const t = now();
+  if (state && state.dur) {
+    $("fill").style.width = Math.min(100, t / state.dur * 100) + "%";
+    $("el").textContent = clock(t); $("rem").textContent = "-" + clock(state.dur - t);
+  }
+  let idx = -1;
+  if (lyrics.synced) for (let i = 0; i < rows.length; i++) { if (rows[i].start <= t) idx = i; else break; }
+  if (idx !== active) {
+    rows.forEach((r, i) => {
+      r.el.classList.toggle("active", i === idx);
+      r.el.classList.toggle("past", i < idx);
+      // Each line follows a beat behind the one above it.
+      r.el.style.transitionDelay = idx < 0 ? "0s" : (Math.min(8, Math.abs(i - idx)) * (window.stagger ?? .06)).toFixed(2) + "s";
+    });
+    if (active >= 0 && rows[active]) rows[active].spans?.forEach(s => { s.classList.remove("sung"); s.style.setProperty("--p", "-10%"); });
+    active = idx;
+  }
+  // Glide the column so the current line sits a third of the way down.
+  const box = $("lyrics").clientHeight;
+  const user = performance.now() < userUntil || !lyrics.synced;
+  const target = user ? userScroll : (idx >= 0 ? rows[idx].el.offsetTop - box * 0.32 : -box * 0.32);
+  scroll += (target - scroll) * (1 - Math.exp(-dt * 8));
+  $("column").style.transform = `translateY(${-scroll}px)`;
+
+  const r = rows[idx];
+  if (r && r.spans) for (const sp of r.spans) {
+    const s = +sp.dataset.s, e = +sp.dataset.e;
+    const p = t <= s ? -10 : t >= e ? 110 : (t - s) / Math.max(1, e - s) * 120 - 10;
+    sp.style.setProperty("--p", p.toFixed(1) + "%");
+    sp.classList.toggle("sung", t > s);
+  }
+  if (r && r.dots) {
+    const prog = Math.min(1, Math.max(0, (t - r.from) / (r.to - r.from)));
+    r.el.classList.add("live");
+    [...r.el.children].forEach((d, i) => d.style.background = `rgba(255,255,255,${.35 + .65 * Math.min(1, Math.max(0, prog * 3 - i))})`);
   }
   requestAnimationFrame(frame);
 }

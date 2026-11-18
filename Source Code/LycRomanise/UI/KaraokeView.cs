@@ -20,6 +20,11 @@ public sealed class DisplayLine
 
 public sealed class KaraokeStyle
 {
+    public StripStyle Layout = StripStyle.Modern;
+    /// <summary>How far a word rises as it is sung, in pixels at the main size (Apple Music style).</summary>
+    public double WordLift;
+    /// <summary>A soft halo around the sung part of the line.</summary>
+    public bool WordGlow;
     public Color Unsung, Sung, Next, Outline, Sub;
     public Typeface Typeface = new("Segoe UI");
     public double FontSize = 34, OutlineWidth = 3;
@@ -102,7 +107,7 @@ public sealed class KaraokeView : FrameworkElement
     double MainSize => Style.FontSize;
     double SubSize => Style.FontSize * 0.58;
     double TransSize => Style.FontSize * 0.5;
-    double NextSize => Style.FontSize * 0.6;
+    double NextSize => Style.FontSize * (Style.Layout == StripStyle.Classic ? 0.76 : 0.6);
     double BackingSize => Style.FontSize * 0.5;
     double LineH(double size) => size * 1.32;
 
@@ -110,6 +115,16 @@ public sealed class KaraokeView : FrameworkElement
     /// translation, backing vocals and the next line.</summary>
     public double DesiredStripHeight()
     {
+        if (Style.Layout == StripStyle.Classic)
+        {
+            // v1's strip: the line being sung and the next one straight under it.
+            double c = 18 + LineH(MainSize) * 2 + LineH(NextSize) * 1.2;
+            if (Style.ShowBacking) c += LineH(BackingSize) * 0.6;
+            if (Style.ShowTranslation) c += LineH(TransSize);
+            return Math.Ceiling(c + LineH(SubSize));
+        }
+        if (Style.Layout == StripStyle.Minimal)
+            return Math.Ceiling(24 + LineH(MainSize) * 2 + LineH(SubSize) + (Style.ShowTranslation ? LineH(TransSize) : 0));
         double h = 18 + LineH(MainSize) * 2 + LineH(SubSize) * 2;
         if (Style.ShowBacking) h += LineH(BackingSize);
         if (Style.ShowTranslation) h += LineH(TransSize);
@@ -263,6 +278,13 @@ public sealed class KaraokeView : FrameworkElement
             var row = rows[r];
             double x = RowX(row.Width, align);
             dc.PushTransform(new TranslateTransform(x, y + used));
+            if (sweep && (Style.WordLift > 0 || Style.WordGlow))
+            {
+                DrawRowLifted(dc, row, size, t, unsung, sung, opacity, pen);
+                dc.Pop();
+                used += LineH(size);
+                continue;
+            }
             if (pen != null) dc.DrawGeometry(null, pen, row.Geometry);
             dc.DrawGeometry(Brush(Fade(unsung, opacity)), null, row.Geometry);
             if (sweep)
@@ -290,6 +312,49 @@ public sealed class KaraokeView : FrameworkElement
             used += LineH(size);
         }
         return used;
+    }
+
+    /// <summary>A row drawn word by word, each word rising a little as it is sung and the sung part
+    /// glowing: the Apple Music look.</summary>
+    void DrawRowLifted(DrawingContext dc, RowLayout row, double size, long t, Color unsung, Color sung, double opacity, Pen? pen)
+    {
+        double sx = SweepX(row, t);
+        double soft = Style.Smooth ? Math.Max(6, size * 0.35) : 0.5;
+        var mask = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute,
+            StartPoint = new Point(sx - soft, 0), EndPoint = new Point(sx + 0.01, 0),
+            GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
+        };
+        double lift = Style.WordLift * size / MainSize;
+        Pen? glowWide = null, glowNarrow = null;
+        if (Style.WordGlow)
+        {
+            glowWide = new Pen(Brush(Fade(sung, 0.14 * opacity)), size * 0.22) { LineJoin = PenLineJoin.Round };
+            glowNarrow = new Pen(Brush(Fade(sung, 0.22 * opacity)), size * 0.1) { LineJoin = PenLineJoin.Round };
+        }
+        for (int i = 0; i < row.Words.Count; i++)
+        {
+            var (x0, x1, start, end) = row.Words[i];
+            // Cut between words halfway across the gap, so no glyph is clipped.
+            double left = i == 0 ? -size : (row.Words[i - 1].x1 + x0) / 2;
+            double right = i == row.Words.Count - 1 ? row.Width + size : (x1 + row.Words[i + 1].x0) / 2;
+            double f = t <= start ? 0 : t >= end ? 1 : (t - start) / (double)Math.Max(1, end - start);
+            double rise = lift * (1 - Math.Pow(1 - f, 3));
+            dc.PushClip(new RectangleGeometry(new Rect(left, -size, right - left, row.Height + size * 2)));
+            dc.PushTransform(new TranslateTransform(0, -rise));
+            if (pen != null) dc.DrawGeometry(null, pen, row.Geometry);
+            dc.DrawGeometry(Brush(Fade(unsung, opacity)), null, row.Geometry);
+            if (f > 0 && sx > 0)
+            {
+                dc.PushOpacityMask(mask);
+                if (glowWide != null) { dc.DrawGeometry(null, glowWide, row.Geometry); dc.DrawGeometry(null, glowNarrow, row.Geometry); }
+                dc.DrawGeometry(Brush(Fade(sung, opacity)), null, row.Geometry);
+                dc.Pop();
+            }
+            dc.Pop();
+            dc.Pop();
+        }
     }
 
     double DrawPlain(DrawingContext dc, string text, double size, double y, Color color, double opacity, LineAlign align = LineAlign.Leading, int maxRows = 1)
@@ -354,6 +419,11 @@ public sealed class KaraokeView : FrameworkElement
 
         var cur = _lines[idx];
         var next = idx + 1 < _lines.Count ? _lines[idx + 1] : null;
+        if (Style.Layout == StripStyle.Classic && _synced && !(t > cur.End + 1200 && (next == null || next.Start - t > 2200)))
+        {
+            RenderClassic(dc, top, t, idx, p);
+            return;
+        }
         // A long instrumental break after the line: dots that fill as the next line comes.
         if (_synced && t > cur.End + 1200 && (next == null || next.Start - t > 2200))
         {
@@ -395,8 +465,61 @@ public sealed class KaraokeView : FrameworkElement
         return used;
     }
 
+    /// <summary>v1's strip. The line being sung sits at the top and the next waits straight under it;
+    /// when the line changes, the next one rises into the top slot and grows to full size while the
+    /// one after it fades up underneath.</summary>
+    void RenderClassic(DrawingContext dc, double top, long t, int idx, double p)
+    {
+        var cur = _lines[idx];
+        var next = idx + 1 < _lines.Count ? _lines[idx + 1] : null;
+        // Where the next line goes: under the current line's rows (one or two) and its romanization.
+        double CurHeight(DisplayLine l)
+        {
+            double h = Layout(l.Main, MainSize, ActualWidth - 32).Length > 1 ? LineH(MainSize) * 2 : LineH(MainSize);
+            if (l.Sub != null) h += LineH(SubSize);
+            if (Style.ShowBacking && l.Backing != null) h += LineH(BackingSize);
+            if (Style.ShowTranslation && !string.IsNullOrEmpty(l.Translation)) h += LineH(TransSize);
+            return h;
+        }
+        double nextY = top + CurHeight(cur) + 2;
+
+        if (p < 1 && _fromIndex >= 0 && _fromIndex < _lines.Count && _fromIndex == idx - 1)
+        {
+            // The old line leaves upward and fades.
+            double leave = Math.Clamp(p / 0.5, 0, 1);
+            dc.PushOpacity(Math.Pow(1 - leave, 2));
+            DrawBlock(dc, _lines[_fromIndex], top - leave * LineH(MainSize) * 0.8, t, 1);
+            dc.Pop();
+            // The new line rises from where it waited and grows from the next line's size to full.
+            double fromY = top + CurHeight(_lines[_fromIndex]) + 2;
+            double y = fromY + (top - fromY) * p;
+            double s = NextSize / MainSize + (1 - NextSize / MainSize) * p;
+            double cx = ActualWidth / 2;
+            dc.PushTransform(new ScaleTransform(s, s, cx, y));
+            DrawBlock(dc, cur, y, t, 1);
+            dc.Pop();
+            if (Style.ShowNext && next != null)
+            {
+                dc.PushOpacity(p);
+                DrawSwept(dc, next.Main, NextSize, nextY + (1 - p) * LineH(NextSize) * 0.5, 0, next.Align, Style.Next, Style.Next, 1, false, 1);
+                dc.Pop();
+            }
+            return;
+        }
+        if (p < 1)
+        {
+            dc.PushOpacity(Math.Clamp(p * 1.5, 0, 1));
+            DrawBlock(dc, cur, top + (1 - p) * LineH(MainSize) * 0.4, t, 1);
+            dc.Pop();
+        }
+        else DrawBlock(dc, cur, top, t, 1);
+        if (Style.ShowNext && next != null)
+            DrawSwept(dc, next.Main, NextSize, nextY, 0, next.Align, Style.Next, Style.Next, 1, false, 1);
+    }
+
     void DrawNext(DrawingContext dc, int index, double appear)
     {
+        if (Style.Layout == StripStyle.Minimal) return;
         var next = _lines[index];
         double y = ActualHeight - LineH(NextSize) - 8;
         dc.PushOpacity(0.55 * appear + 0.0);

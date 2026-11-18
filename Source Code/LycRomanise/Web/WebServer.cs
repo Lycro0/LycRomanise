@@ -99,9 +99,12 @@ public sealed class WebServer
             playing = m?.Playing ?? false,
             pos = _app.Clock(),
             dur = m?.DurationMs ?? 0,
+            album = m?.Album,
+            cover = _app.CoverBytes != null ? _app.CoverVersion : 0,
             colors = new { unsung = s.UnsungColor, sung = s.SungColor, next = s.NextLineColor, outline = s.OutlineColor, sub = s.SubColor },
-            font = s.FontFamily,
-            showNext = s.ShowNextLine, showTr = s.ShowTranslation,
+            font = s.FontFamily, size = s.FontSize, bold = s.Bold, outlineWidth = s.OutlineWidth, glow = s.Glow,
+            layout = s.StripStyle.ToString(), lift = s.WordLift, wordGlow = s.WordGlow, motion = s.LyricsMotion.ToString(),
+            showNext = s.ShowNextLine, showTr = s.ShowTranslation, showBacking = s.ShowBackingVocals,
         });
     }
 
@@ -133,9 +136,18 @@ public sealed class WebServer
                 var path = firstLine[1].Split('?')[0];
                 switch (path)
                 {
+                    case "/" when firstLine[1].Contains("obs=1"):
+                    case "/obs":
+                        await Send(stream, 200, "text/html; charset=utf-8", Page("web.obs.html"), ct);
+                        break;
                     case "/":
                     case "/index.html":
-                        await Send(stream, 200, "text/html; charset=utf-8", Page(), ct);
+                        await Send(stream, 200, "text/html; charset=utf-8", Page("web.index.html"), ct);
+                        break;
+                    case "/cover":
+                        var cover = _app.CoverBytes;
+                        if (cover == null) await Send(stream, 404, "text/plain", "no cover", ct);
+                        else await SendBytes(stream, "image/jpeg", cover, ct);
                         break;
                     case "/state":
                         string state = "";
@@ -154,13 +166,23 @@ public sealed class WebServer
         }
     }
 
-    static string? _page;
-    static string Page()
+    static readonly Dictionary<string, string> _pages = new();
+    static string Page(string name)
     {
-        if (_page != null) return _page;
-        using var s = typeof(WebServer).Assembly.GetManifestResourceStream("web.index.html");
-        using var r = new StreamReader(s!);
-        return _page = r.ReadToEnd();
+        lock (_pages)
+        {
+            if (_pages.TryGetValue(name, out var page)) return page;
+            using var s = typeof(WebServer).Assembly.GetManifestResourceStream(name);
+            using var r = new StreamReader(s!);
+            return _pages[name] = r.ReadToEnd();
+        }
+    }
+
+    static async Task SendBytes(NetworkStream stream, string type, byte[] body, CancellationToken ct)
+    {
+        var head = $"HTTP/1.1 200 OK\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(head), ct);
+        await stream.WriteAsync(body, ct);
     }
 
     static async Task Send(NetworkStream stream, int status, string type, string body, CancellationToken ct)

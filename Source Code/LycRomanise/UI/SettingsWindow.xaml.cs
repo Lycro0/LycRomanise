@@ -324,29 +324,63 @@ public partial class SettingsWindow : Window
 
     UIElement LookPage()
     {
-        var p = PageRoot("Appearance", "Colours, font and effects of the lyrics strip.");
+        var p = PageRoot("Appearance", "Pick a look, then fine-tune its colours, font and effects.");
+        p.Children.Add(Group("Looks"));
+        var gallery = new WrapPanel { Margin = new Thickness(-4, 0, 0, 0) };
+        foreach (var preset in LookPresets.All)
+        {
+            // Each card previews the look: its words in its own colours, half sung.
+            var trial = _s.Copy();
+            preset.Apply(trial);
+            bool chosen = _s.LookPreset == preset.Name;
+            var sample = new TextBlock { FontSize = 17, FontWeight = trial.Bold ? FontWeights.Bold : FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0) };
+            sample.Inlines.Add(new System.Windows.Documents.Run("Sing ") { Foreground = new SolidColorBrush(Theme.ParseColor(trial.SungColor, Colors.White)) });
+            sample.Inlines.Add(new System.Windows.Documents.Run("along") { Foreground = new SolidColorBrush(Theme.ParseColor(trial.UnsungColor, Colors.White)) });
+            var nextSample = new TextBlock { Text = trial.StripStyle == StripStyle.Minimal ? " " : "the next line", FontSize = 11, Foreground = new SolidColorBrush(Theme.ParseColor(trial.NextLineColor, Colors.White)), Opacity = 0.8 };
+            var bgColor = Theme.ParseColor(trial.BackgroundColor, Colors.Black);
+            var face = new Border
+            {
+                CornerRadius = new CornerRadius(8), Padding = new Thickness(12, 2, 12, 10), Margin = new Thickness(0, 8, 0, 0),
+                Background = new SolidColorBrush(trial.BackgroundOpacity > 0.05 ? Color.FromArgb((byte)(Math.Max(0.6, trial.BackgroundOpacity) * 255), bgColor.R, bgColor.G, bgColor.B) : Color.FromRgb(0x0E, 0x0E, 0x12)),
+                Child = new StackPanel { Children = { sample, nextSample } },
+            };
+            var body = new StackPanel { Width = 196 };
+            body.Children.Add(new TextBlock { Text = preset.Name, FontWeight = FontWeights.SemiBold, FontSize = 14 });
+            body.Children.Add(new TextBlock { Text = preset.Description, Style = (Style)Application.Current.FindResource("CardHint"), Height = 34, TextTrimming = TextTrimming.CharacterEllipsis });
+            body.Children.Add(face);
+            var card = new Button
+            {
+                Content = body, Margin = new Thickness(4), Padding = new Thickness(12), HorizontalContentAlignment = HorizontalAlignment.Left,
+                BorderThickness = new Thickness(chosen ? 2 : 1),
+                BorderBrush = chosen ? (Brush)FindResource("AccentFillColorDefaultBrush") : (Brush)FindResource("CardStrokeColorDefaultBrush"),
+            };
+            card.Click += (_, _) =>
+            {
+                preset.Apply(_s);
+                _s.LookPreset = preset.Name;
+                Changed(lyricsAffected: true);
+                Show("look");
+            };
+            gallery.Children.Add(card);
+        }
+        p.Children.Add(gallery);
+
+        p.Children.Add(Group("Layout"));
+        p.Children.Add(Card("Strip layout", "Classic: the line and the next one straight under it. Modern: romanization under the line, next line at the bottom. Minimal: one line.",
+            Combo(_s.StripStyle, new[] { (StripStyle.Classic, "Classic"), (StripStyle.Modern, "Modern"), (StripStyle.Minimal, "Minimal") }, v => _s.StripStyle = v), "\uE8A1"));
+        p.Children.Add(Card("Words lift as they're sung", "The Apple Music touch.", SliderBox(_s.WordLift, 0, 8, 0.5, "{0:0.0} px", v => _s.WordLift = v), "\uE74A"));
+        p.Children.Add(Card("Glow on sung words", null, Toggle(_s.WordGlow, v => _s.WordGlow = v), "\uE706"));
+
+        p.Children.Add(Group("Full lyrics window"));
+        p.Children.Add(Card("Motion", "How words lift and glow and how the lines move. Apple Music, Glow, Float, Calm or Snappy.",
+            Combo(_s.LyricsMotion, LookPresets.MotionNames, v => _s.LyricsMotion = v), "\uE8BC"));
+
         p.Children.Add(Group("Colours"));
         p.Children.Add(Card("Not yet sung", null, ColorBox(_s.UnsungColor, v => _s.UnsungColor = v), ""));
         p.Children.Add(Card("Sung", "The colour sweeps across each word as it is sung.", ColorBox(_s.SungColor, v => _s.SungColor = v), ""));
         p.Children.Add(Card("Next line", null, ColorBox(_s.NextLineColor, v => _s.NextLineColor = v), ""));
         p.Children.Add(Card("Romanization and translation", null, ColorBox(_s.SubColor, v => _s.SubColor = v), ""));
         p.Children.Add(Card("Outline", null, ColorBox(_s.OutlineColor, v => _s.OutlineColor = v), ""));
-        var presets = new WrapPanel { Margin = new Thickness(-6, 0, 0, 0) };
-        foreach (var (name, un, sung, next, sub) in new[]
-                 {
-                     ("Classic", "#FFE14D", "#FF3D9A", "#FFE14D", "#E6FFFFFF"),
-                     ("Apple", "#80FFFFFF", "#FFFFFF", "#66FFFFFF", "#B3FFFFFF"),
-                     ("Neon", "#7CF5FF", "#FF3DF2", "#7CF5FF", "#E6FFFFFF"),
-                     ("Sunset", "#FFD1A9", "#FF6B6B", "#FFD1A9", "#E6FFFFFF"),
-                     ("Mint", "#C3F0CA", "#2ED573", "#C3F0CA", "#E6FFFFFF"),
-                 })
-            presets.Children.Add(Btn(name, () =>
-            {
-                _s.UnsungColor = un; _s.SungColor = sung; _s.NextLineColor = next; _s.SubColor = sub;
-                Changed();
-                Show("look");
-            }));
-        p.Children.Add(Card("Presets", null, presets, ""));
 
         p.Children.Add(Group("Text"));
         var fonts = new ComboBox { MinWidth = 240, IsEditable = true, Text = _s.FontFamily };
@@ -588,7 +622,7 @@ public partial class SettingsWindow : Window
             Orientation = Orientation.Horizontal,
             Children = { Btn("Copy", () => Clipboard.SetText(url)), Btn("Open", () => Open(url)) },
         }, ""));
-        var obs = url + "?obs=1";
+        var obs = url + "obs";
         p.Children.Add(Card("Link for OBS (transparent)", obs, Btn("Copy", () => Clipboard.SetText(obs)), ""));
         p.Children.Add(Card("Hide lyrics on this PC", "Only the web view shows them.", Toggle(_s.HideDesktopStrip, v => _s.HideDesktopStrip = v), ""));
         p.Children.Add(Group("Song title file"));

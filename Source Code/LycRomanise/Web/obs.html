@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LycRomanise for OBS</title>
+<style>
+  /* Transparent: add this page as an OBS Browser source. It follows the strip's look from Settings. */
+  :root { --unsung:#ffe14d; --sung:#ff3d9a; --next:#ffe14d; --outline:#000; --sub:#ffffffe6; --ow:2px; --size:56px; --lift:0px; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; color: #fff; display: flex; justify-content: center; align-items: flex-start; }
+  #stage { width: 96vw; margin-top: 3vh; text-align: center; position: relative; }
+  .blk { position: relative; transition: transform .34s cubic-bezier(.2,.8,.2,1), opacity .34s; transform-origin: center top; }
+  .main { font-weight: 800; font-size: var(--size); line-height: 1.25; }
+  .sub  { font-weight: 650; font-size: calc(var(--size) * .58); line-height: 1.3; }
+  .bg   { font-weight: 650; font-size: calc(var(--size) * .5); line-height: 1.3; opacity: .85; }
+  .tr   { font-weight: 600; font-size: calc(var(--size) * .5); line-height: 1.3; color: var(--sub); opacity: .85; }
+  .next { font-weight: 750; font-size: calc(var(--size) * var(--nextScale, .6)); line-height: 1.3; color: var(--next); opacity: .6;
+          -webkit-text-stroke: calc(var(--ow) * .8) var(--outline); paint-order: stroke fill; }
+  .classic .next { opacity: 1; }
+  /* The outline is a copy of the word behind it, so it never eats into the karaoke fill. */
+  .wr { display: inline-block; position: relative; white-space: pre; transition: transform .4s cubic-bezier(.2,.8,.2,1); }
+  .wr .o { position: absolute; left: 0; top: 0; white-space: pre; color: var(--outline); -webkit-text-stroke: calc(var(--ow) * 2) var(--outline); }
+  .w { display: inline-block; white-space: pre; position: relative;
+       background: linear-gradient(90deg, var(--sung) var(--p), var(--unsung) calc(var(--p) + 7%));
+       -webkit-background-clip: text; background-clip: text; color: transparent; --p: -7%; }
+  .sub .w, .bg .w { background: linear-gradient(90deg, var(--sung) var(--p), var(--sub) calc(var(--p) + 7%)); -webkit-background-clip: text; background-clip: text; }
+  .glow .wr .o { filter: drop-shadow(0 0 6px rgba(0,0,0,.55)); }
+  .wglow .wr.sung .w { filter: drop-shadow(0 0 10px var(--sung)); }
+  .wr.sung { transform: translateY(calc(var(--lift) * -1)); }
+  .trailing { text-align: right; }
+  /* The outgoing line leaves the flow at once, so it never pushes the new lines down. */
+  .leave { position: absolute; left: 0; right: 0; top: 0; opacity: 0; transform: translateY(-40%); }
+  .rise  { animation: rise .34s cubic-bezier(.2,.8,.2,1); }
+  @keyframes rise { from { opacity: .2; transform: translateY(30%); } to { opacity: 1; transform: none; } }
+  .classic .rise { animation: grow .38s cubic-bezier(.2,.8,.2,1); }
+  @keyframes grow { from { transform: translateY(100%) scale(var(--nextScale, .76)); } to { transform: none; } }
+  .dots span { display: inline-block; width: .32em; height: .32em; border-radius: 50%; margin: 0 .3em; background: var(--unsung);
+               opacity: .45; animation: breathe 1.3s ease-in-out infinite; font-size: var(--size); }
+  @keyframes breathe { 50% { transform: scale(1.15); } }
+  @media (prefers-reduced-motion: reduce) { .rise, .classic .rise { animation: none; } .blk, .wr { transition: none; } }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+let state = null, stateAt = 0, lyrics = { lines: [] }, version = -1, shown = -3;
+const stage = document.getElementById("stage");
+const q = new URLSearchParams(location.search);
+// ?bg=1a1a2e previews the page on a colour instead of transparent (OBS ignores it unless set).
+if (q.get("bg")) document.documentElement.style.background = "#" + q.get("bg").replace(/[^0-9a-fA-F]/g, "");
+
+async function poll() {
+  try {
+    const s = await (await fetch("/state", { cache: "no-store" })).json();
+    state = s; stateAt = performance.now();
+    const r = document.documentElement.style;
+    // The app writes #AARRGGBB; CSS reads #RRGGBBAA.
+    const css = c => c && c.length === 9 ? "#" + c.slice(3) + c.slice(1, 3) : c;
+    r.setProperty("--unsung", css(s.colors.unsung)); r.setProperty("--sung", css(s.colors.sung));
+    r.setProperty("--next", css(s.colors.next)); r.setProperty("--outline", css(s.colors.outline));
+    r.setProperty("--sub", css(s.colors.sub));
+    r.setProperty("--ow", (s.outlineWidth || 0) * 1.4 + "px");
+    r.setProperty("--size", (q.get("size") || s.size * 1.6) + "px");
+    r.setProperty("--lift", (s.lift || 0) * 1.6 + "px");
+    const layout = (q.get("style") || s.layout || "Classic").toLowerCase();
+    r.setProperty("--nextScale", layout === "classic" ? .76 : .6);
+    document.body.className = [layout, s.glow ? "glow" : "", s.wordGlow ? "wglow" : ""].join(" ");
+    document.body.style.fontFamily = `"${s.font}", "Segoe UI", system-ui, sans-serif`;
+    if (s.v !== version) { lyrics = await (await fetch("/lyrics", { cache: "no-store" })).json(); version = s.v; shown = -3; }
+  } catch (e) { }
+  setTimeout(poll, 1000);
+}
+
+function now() { return !state ? 0 : state.playing ? state.pos + (performance.now() - stateAt) : state.pos; }
+
+function words(line, cls) {
+  const d = document.createElement("div");
+  d.className = cls;
+  line.w.forEach((w, i) => {
+    if (i > 0 && !w.j) d.append(" ");
+    const wr = document.createElement("span"); wr.className = "wr";
+    const o = document.createElement("span"); o.className = "o"; o.textContent = w.t;
+    const sp = document.createElement("span");
+    sp.className = "w"; sp.textContent = w.t; sp.dataset.s = w.s; sp.dataset.e = w.e;
+    wr.append(o, sp);
+    d.append(wr);
+  });
+  return d;
+}
+const text = l => l.w.map((w, i) => (i > 0 && !w.j ? " " : "") + w.t).join("");
+
+function render(idx) {
+  const old = stage.querySelector(".blk.cur");
+  if (old) { old.classList.remove("cur"); old.classList.add("leave"); setTimeout(() => old.remove(), 360); }
+  stage.querySelectorAll(".next").forEach(n => n.remove());
+  const L = lyrics.lines, layout = document.body.classList.contains("classic") ? "classic" : document.body.classList.contains("minimal") ? "minimal" : "modern";
+  if (!state || !state.title || !L.length) return;
+  const blk = document.createElement("div");
+  blk.className = "blk cur rise";
+  if (idx === -2 || idx === -1) {
+    blk.innerHTML = '<div class="main dots"><span></span><span></span><span></span></div>';
+  } else {
+    const l = L[idx];
+    if (l.a) blk.classList.add("trailing");
+    blk.append(words(l.m, "main"));
+    if (l.sub) blk.append(words(l.sub, "sub"));
+    if (l.b && state.showBacking) blk.append(words(l.b, "bg"));
+    if (l.tr && state.showTr) { const t = document.createElement("div"); t.className = "tr"; t.textContent = l.tr; blk.append(t); }
+  }
+  stage.append(blk);
+  const ni = idx < 0 ? 0 : idx + 1;
+  if (layout !== "minimal" && state.showNext && L[ni] && idx !== -2) {
+    const n = document.createElement("div");
+    n.className = "next" + (L[ni].a ? " trailing" : "");
+    n.textContent = text(L[ni].m);
+    stage.append(n);
+  }
+}
+
+function frame() {
+  const t = now(), L = lyrics.lines;
+  let idx = -1;
+  if (!lyrics.synced && L.length && state && state.dur) idx = Math.min(L.length - 1, Math.floor(t / state.dur * L.length));
+  else for (let i = 0; i < L.length; i++) { if (L[i].m.s <= t) idx = i; else break; }
+  if (lyrics.synced && idx >= 0) {
+    const cur = L[idx], nx = L[idx + 1];
+    if (t > Math.max(cur.m.e, cur.b ? cur.b.e : 0) + 1200 && (!nx || nx.m.s - t > 2200)) idx = nx ? -2 : idx;
+  }
+  if (idx !== shown) { shown = idx; render(idx); }
+  if (lyrics.synced) for (const sp of stage.querySelectorAll(".cur .w")) {
+    const s = +sp.dataset.s, e = +sp.dataset.e;
+    const p = t <= s ? -7 : t >= e ? 107 : (t - s) / Math.max(1, e - s) * 114 - 7;
+    sp.style.setProperty("--p", p.toFixed(1) + "%");
+    sp.parentElement.classList.toggle("sung", t > s);
+  }
+  requestAnimationFrame(frame);
+}
+poll();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

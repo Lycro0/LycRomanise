@@ -49,6 +49,8 @@ public sealed class LyricsPageView : FrameworkElement
         FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
 
     public Action<long>? Seek { get; set; }
+    /// <summary>How words lift and glow and how the column moves (LookPresets.Motion).</summary>
+    public (double lift, double glow, double stagger, double scroll, double dim) Motion { get; set; } = LookPresets.Motion(LyricsMotion.AppleMusic);
     public bool ShowTranslation { get; set; } = true;
 
     public LyricsPageView()
@@ -256,19 +258,19 @@ public sealed class LyricsPageView : FrameworkElement
         bool user = now < _userUntil;
         double anchor = ActualHeight * 0.32;
         double target = user ? _userScroll : _active >= 0 ? _blocks[_active].Top - anchor : -anchor;
-        _scroll += (target - _scroll) * (1 - Math.Exp(-dt * 9));
+        _scroll += (target - _scroll) * (1 - Math.Exp(-dt * Motion.scroll));
 
         for (int i = 0; i < _blocks.Count; i++)
         {
             var b = _blocks[i];
             // Each line follows a little behind the one above it, for the wave Apple Music has.
             int dist = _active < 0 ? 0 : Math.Abs(i - _active);
-            double rate = user ? 14 : 7.5 / (1 + Math.Min(dist, 8) * 0.18);
+            double rate = user ? 14 : Motion.scroll * 0.83 / (1 + Math.Min(dist, 8) * Motion.stagger);
             double goalY = b.Top - _scroll;
             b.Y += (goalY - b.Y) * (1 - Math.Exp(-dt * rate));
             if (dt == 0) b.Y = goalY;
             bool isActive = i == _active;
-            double goalOpacity = !_synced ? 0.85 : isActive ? 1 : i == _hover ? 0.75 : user ? 0.6 : 0.42;
+            double goalOpacity = !_synced ? 0.85 : isActive ? 1 : i == _hover ? 0.75 : user ? 0.6 : Motion.dim;
             double goalScale = isActive || !_synced ? 1 : 0.965;
             b.Opacity += (goalOpacity - b.Opacity) * (1 - Math.Exp(-dt * 10));
             b.Scale += (goalScale - b.Scale) * (1 - Math.Exp(-dt * 10));
@@ -308,6 +310,10 @@ public sealed class LyricsPageView : FrameworkElement
         {
             dc.DrawGeometry(active || !_synced ? bright : dim, null, text.Geometry);
         }
+        else if (Motion.lift > 0 || Motion.glow > 0)
+        {
+            DrawLifted(dc, text, t, dim, bright);
+        }
         else
         {
             dc.DrawGeometry(dim, null, text.Geometry);
@@ -342,6 +348,47 @@ public sealed class LyricsPageView : FrameworkElement
         }
         dc.Pop();
         return text.Height;
+    }
+
+    /// <summary>The current line word by word: each word rises as it is sung and its sung part glows.</summary>
+    void DrawLifted(DrawingContext dc, Text text, long t, Brush dim, Brush bright)
+    {
+        double lift = Motion.lift * _fontSize / 36;
+        Pen? glow = Motion.glow > 0 ? new Pen(new SolidColorBrush(Color.FromArgb((byte)(40 * Motion.glow), 255, 255, 255)), _fontSize * 0.2) { LineJoin = PenLineJoin.Round } : null;
+        var words = text.Words;
+        for (int i = 0; i < words.Count; i++)
+        {
+            var (rect, start, end) = words[i];
+            double f = t <= start ? 0 : t >= end ? 1 : (t - start) / (double)Math.Max(1, end - start);
+            // Words on the same row are cut halfway across the gap; a word that wraps keeps its own box.
+            bool sameRowBefore = i > 0 && Math.Abs(words[i - 1].rect.Y - rect.Y) < 2;
+            bool sameRowAfter = i + 1 < words.Count && Math.Abs(words[i + 1].rect.Y - rect.Y) < 2;
+            double left = sameRowBefore ? (words[i - 1].rect.Right + rect.Left) / 2 : rect.Left - _fontSize;
+            double right = sameRowAfter ? (rect.Right + words[i + 1].rect.Left) / 2 : rect.Right + _fontSize;
+            var box = new Rect(left, rect.Y - _fontSize * 0.4, Math.Max(1, right - left), rect.Height + _fontSize * 0.8);
+            double rise = lift * (1 - Math.Pow(1 - f, 3));
+            dc.PushClip(new RectangleGeometry(box));
+            dc.PushTransform(new TranslateTransform(0, -rise));
+            dc.DrawGeometry(dim, null, text.Geometry);
+            if (f > 0)
+            {
+                // The sung part of the word, with a soft leading edge.
+                double edge = Math.Min(14, rect.Width * 0.4);
+                double sx = rect.X + rect.Width * f;
+                var mask = new LinearGradientBrush
+                {
+                    MappingMode = BrushMappingMode.Absolute,
+                    StartPoint = new Point(f >= 1 ? right + 1 : sx - edge, 0), EndPoint = new Point(f >= 1 ? right + 2 : sx + 0.1, 0),
+                    GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
+                };
+                dc.PushOpacityMask(mask);
+                if (glow != null) dc.DrawGeometry(null, glow, text.Geometry);
+                dc.DrawGeometry(bright, null, text.Geometry);
+                dc.Pop();
+            }
+            dc.Pop();
+            dc.Pop();
+        }
     }
 
     void DrawDots(DrawingContext dc, double x, double y, Block b, long t)

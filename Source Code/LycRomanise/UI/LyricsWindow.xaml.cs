@@ -19,13 +19,15 @@ public partial class LyricsWindow : Window
         _app = app;
         InitializeComponent();
         var s = app.Settings;
-        Width = s.LyricsWidth;
-        Height = s.LyricsHeight;
+        // Never larger than the screen it opens on.
+        Width = Math.Min(s.LyricsWidth, SystemParameters.WorkArea.Width);
+        Height = Math.Min(s.LyricsHeight, SystemParameters.WorkArea.Height);
         if (s.LyricsLeft is double l && s.LyricsTop is double t) { WindowStartupLocation = WindowStartupLocation.Manual; Left = l; Top = t; }
         else WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Topmost = s.LyricsAlwaysOnTop;
         PinBtn.Opacity = Topmost ? 1 : 0.6;
         Page.FontSize = s.LyricsFontSize;
+        Page.Motion = LookPresets.Motion(s.LyricsMotion);
         Page.SetClock(app.Clock);
         Page.Seek = app.SeekToLyric;
 
@@ -55,6 +57,12 @@ public partial class LyricsWindow : Window
         KeyDown += OnKey;
         OnTrack();
         OnLyrics();
+    }
+
+    public void ApplySettings()
+    {
+        Page.Motion = LookPresets.Motion(_app.Settings.LyricsMotion);
+        Page.InvalidateVisual();
     }
 
     void OnMediaChanged(Media.MediaState? _) => Dispatcher.BeginInvoke(() => { UpdateAnimating(); UpdateProgress(); });

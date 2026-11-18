@@ -36,9 +36,26 @@ Answers are kept in a cache, so a song you play again shows its lyrics at once. 
 
 Put files named `Artist - Title.lrc` (or `.ttml` / `.txt`) in the imported lyrics folder; subfolders are searched too. Or use Settings → Now playing → **Import lyrics file…** while the song plays. LRC files that list each line twice (original and romanization at the same time) are understood.
 
+## Looks
+
+Settings → Appearance starts with a gallery of looks; one click sets the layout, colours, outline, glow, background and how the words move. You can then change any part of it.
+
+| Look | What it is |
+| --- | --- |
+| Classic | The original LycRomanise: the line being sung at the top, the next line straight under it, yellow turning pink, romanized. The next line rises and grows into place. The default. |
+| Modern | Original and romanized together, bolder outline, the next line at the bottom |
+| Apple Music | White words that light up, lift and glow as they're sung, on frosted glass |
+| Spotify | Grey turning white on a dark card |
+| Neon | Cyan into magenta with a glow |
+| Karaoke | Big white words filling blue, thick outline |
+| Minimal | Just the line being sung |
+| Sunset / Mint | Colour variations of Modern |
+
+The **strip layout** (Classic, Modern, Minimal), **word lift** and **glow on sung words** can also be set on their own.
+
 ## Full lyrics window
 
-Open it with the tray icon, by double-clicking the strip, with **Ctrl + Alt + L**, or from the **Full lyrics** bar in Settings. Scroll freely; it follows the song again after 4 seconds. Click a line to jump there, or click the progress bar to seek. **Space** plays and pauses, **F11** maximizes, **Ctrl + / Ctrl −** change the text size. Buttons at the top right copy the lyrics, choose other lyrics, keep the window on top and hide the player panel.
+Open it with the tray icon, by double-clicking the strip, with **Ctrl + Alt + L**, or from the **Full lyrics** bar in Settings. Its **motion** (Settings → Appearance) can be Apple Music, Glow, Float, Calm or Snappy: how far words lift, how much they glow, and how the lines move. Scroll freely; it follows the song again after 4 seconds. Click a line to jump there, or click the progress bar to seek. **Space** plays and pauses, **F11** maximizes, **Ctrl + / Ctrl −** change the text size. Buttons at the top right copy the lyrics, choose other lyrics, keep the window on top and hide the player panel.
 
 ## Spotify login (optional)
 

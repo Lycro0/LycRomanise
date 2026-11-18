@@ -22,6 +22,9 @@ public sealed class AppController : IDisposable
     public SpotifyClient Spotify { get; }
     /// <summary>The cover of what is playing: Spotify's 640 px image when logged in, else the player's thumbnail.</summary>
     public System.Windows.Media.Imaging.BitmapSource? Cover { get; private set; }
+    /// <summary>The cover's image bytes, for the web view.</summary>
+    public byte[]? CoverBytes { get; private set; }
+    public int CoverVersion { get; private set; }
     public event Action? LyricsChanged;
     public event Action? TrackChanged;
     public UpdateInfo? Update { get; private set; }
@@ -109,6 +112,28 @@ public sealed class AppController : IDisposable
         var err = await Updater.InstallAsync(Update, progress, CancellationToken.None);
         if (err == null) Quit();
         return err;
+    }
+
+    /// <summary>For recording previews: shows each look preset in turn for `seconds`, without saving
+    /// anything, then puts the user's own look back. Started with --demo-looks.</summary>
+    public async Task DemoLooksAsync(double seconds)
+    {
+        var original = Settings;
+        foreach (var preset in LookPresets.All)
+        {
+            var look = original.Copy();
+            preset.Apply(look);
+            look.Locked = true;
+            Settings = look;
+            Overlay.ApplySettings(look);
+            Reprepare();
+            Log.Info($"demo: {preset.Name}");
+            await Task.Delay(TimeSpan.FromSeconds(seconds));
+        }
+        Settings = original;
+        Overlay.ApplySettings(original);
+        Reprepare();
+        Log.Info("demo: done");
     }
 
     public void ToggleLyricsWindow()
@@ -229,6 +254,8 @@ public sealed class AppController : IDisposable
             img.Freeze();
             if (url == null && Cover != null) return;   // Spotify's cover already arrived
             Cover = img;
+            CoverBytes = bytes;
+            CoverVersion++;
             TrackChanged?.Invoke();
         }
         catch (OperationCanceledException) { }
@@ -433,6 +460,7 @@ public sealed class AppController : IDisposable
         if (themeChanged) Theme.Apply(Settings.Theme);
         if (autostartChanged) Autostart.Apply(Settings.StartWithWindows);
         if (hotkeysChanged) ApplyHotkeys();
+        _lyricsWindow?.ApplySettings();
         Overlay.ApplySettings(Settings);
         if (webChanged)
         {

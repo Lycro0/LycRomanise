@@ -9,6 +9,10 @@ public enum DisplayMode { RomanizedOnly, OriginalAndRomanized, OriginalOnly }
 public enum ThemeChoice { System, Dark, Light }
 public enum NowPlayingFormat { ArtistTitle, TitleArtist, Title }
 public enum StripAlign { Center, Left, Right }
+/// <summary>How the strip lays its lines out.</summary>
+public enum StripStyle { Classic, Modern, Minimal }
+/// <summary>How the full lyrics window moves.</summary>
+public enum LyricsMotion { AppleMusic, Glow, Float, Calm, Snappy }
 
 public sealed class SourceEntry
 {
@@ -19,6 +23,11 @@ public sealed class SourceEntry
 public sealed class AppSettings
 {
     // ---- Look ----
+    public StripStyle StripStyle { get; set; } = StripStyle.Classic;
+    public double WordLift { get; set; }
+    public bool WordGlow { get; set; }
+    public string LookPreset { get; set; } = "Classic";
+    public LyricsMotion LyricsMotion { get; set; } = LyricsMotion.AppleMusic;
     public string UnsungColor { get; set; } = "#FFE14D";
     public string SungColor { get; set; } = "#FF3D9A";
     public string NextLineColor { get; set; } = "#FFE14D";
@@ -32,7 +41,7 @@ public sealed class AppSettings
     public bool Bold { get; set; } = true;
     public double OutlineWidth { get; set; } = 3;
     public bool Glow { get; set; } = true;
-    public DisplayMode Display { get; set; } = DisplayMode.OriginalAndRomanized;
+    public DisplayMode Display { get; set; } = DisplayMode.RomanizedOnly;
     public bool ShowTranslation { get; set; } = false;
     public string TranslationLanguage { get; set; } = "en";
     public bool ShowNextLine { get; set; } = true;

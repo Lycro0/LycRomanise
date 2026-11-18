@@ -52,6 +52,9 @@ public partial class OverlayWindow : Window
         Panel.CornerRadius = new CornerRadius(s.CornerRadius);
         View.SetStyle(new KaraokeStyle
         {
+            Layout = s.StripStyle,
+            WordLift = s.WordLift,
+            WordGlow = s.WordGlow,
             Unsung = Theme.ParseColor(s.UnsungColor, Colors.Gold),
             Sung = Theme.ParseColor(s.SungColor, Colors.HotPink),
             Next = Theme.ParseColor(s.NextLineColor, Colors.Gold),
@@ -61,7 +64,7 @@ public partial class OverlayWindow : Window
                 FontStyles.Normal, s.Bold ? FontWeights.Bold : FontWeights.SemiBold, FontStretches.Normal),
             FontSize = s.FontSize,
             OutlineWidth = s.OutlineWidth,
-            ShowNext = s.ShowNextLine,
+            ShowNext = s.ShowNextLine && s.StripStyle != StripStyle.Minimal,
             ShowTranslation = s.ShowTranslation,
             ShowBacking = s.ShowBackingVocals,
             Smooth = s.SmoothSweep,

@@ -13,7 +13,7 @@
                     <RotateTransform x:Name="DriftRotate" Angle="0"/>
                 </TransformGroup>
             </Grid.RenderTransform>
-            <Image x:Name="Backdrop" Stretch="UniformToFill" Opacity="0.9">
+            <Image x:Name="Backdrop" Stretch="UniformToFill" Opacity="0.85">
                 <Image.Effect>
                     <BlurEffect Radius="110" KernelType="Gaussian" RenderingBias="Performance"/>
                 </Image.Effect>
@@ -34,8 +34,8 @@
         <Rectangle>
             <Rectangle.Fill>
                 <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                    <GradientStop Color="#66000000" Offset="0"/>
-                    <GradientStop Color="#8C000000" Offset="1"/>
+                    <GradientStop Color="#8C000000" Offset="0"/>
+                    <GradientStop Color="#B8000000" Offset="1"/>
                 </LinearGradientBrush>
             </Rectangle.Fill>
         </Rectangle>

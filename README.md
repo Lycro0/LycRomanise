@@ -7,7 +7,7 @@ Synced lyrics on your desktop for whatever is playing on Spotify, Apple Music or
     <img src="Source%20Code/assets/LycRomanise-Preview.gif" alt="LycRomanise showing synced, romanized lyrics on the desktop" width="100%">
   </a>
   <br>
-  <sub>Click the preview to watch it as a video.</sub>
+  <sub>Click the preview to watch the full tour as a video: every look, the full lyrics window, the web view and the OBS page.</sub>
 </p>
 
 > **v2 is a full rewrite.** LycRomanise is now a native Windows app written in C# / .NET 10 instead of Python.
@@ -21,11 +21,13 @@ Get **LycRomanise_Setup.exe** (installer) or **LycRomanise.exe** (portable) from
 ## What you get
 
 - A lyrics strip on top of your screen: the line being sung fills **word by word**, with the next line underneath
+- **Nine looks** to pick from: **Classic** (the original LycRomanise layout, and the default), Modern, Apple Music, Spotify, Neon, Karaoke, Minimal, Sunset and Mint
 - A **full lyrics window** in the style of Apple Music: a blurred cover backdrop, every line scrolling with the song, and click any line to jump there
 - Korean, Japanese and Chinese lyrics in English letters (romaja, romaji, pinyin), plus Cyrillic, Greek, Arabic, Hebrew and Hindi
 - Duets on two sides, backing vocals, and translations under each line
 - Lyrics from **ten sources**, asked in order: Spicy Lyrics, BiniLyrics, your own files, Musixmatch, Unison, NetEase, LRCLIB, QQ Music, KuGou and Genius
-- A **web view** for phones, tablets and OBS browser sources, and `LycRomanise.txt` for OBS text sources
+- A **web view** for phones and tablets that looks like the full lyrics window, plus a separate **transparent page for OBS** that follows your strip's look
+- `LycRomanise.txt` for OBS text sources
 - Optional **Spotify login** that looks up the next song's lyrics before it starts
 
 ## How to use it
@@ -40,7 +42,7 @@ Get **LycRomanise_Setup.exe** (installer) or **LycRomanise.exe** (portable) from
 | Page | What is in it |
 | --- | --- |
 | Now playing | The song, where its lyrics came from, timing, choose or import lyrics |
-| Appearance | Colours and presets, font, glow, background |
+| Appearance | Looks (Classic, Apple Music and more), layout, word lift and glow, the full lyrics window's motion, colours, font, background |
 | Lyrics & romanization | Original / romanized / both, translations, backing vocals |
 | Lyric sources | Turn sources on or off and reorder them, Spicy Lyrics key, imported lyrics folder |
 | Spotify account | Optional login for next-song prefetch |
@@ -53,7 +55,7 @@ The **Full lyrics** button at the bottom of the Settings sidebar opens the lyric
 
 ## Using it with OBS
 
-- **Lyrics on stream:** turn on the web view in Settings, then add a **Browser** source in OBS with the link that ends in `?obs=1` (transparent background).
+- **Lyrics on stream:** turn on the web view in Settings, then add a **Browser** source in OBS with the link that ends in `/obs`. It's transparent and copies your strip's look.
 - **Song name only:** add a **Text (GDI+)** source, tick **Read from file** and pick `LycRomanise.txt`.
 
 ## Need more?
