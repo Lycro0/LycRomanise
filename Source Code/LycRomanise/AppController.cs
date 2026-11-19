@@ -72,6 +72,8 @@ public sealed class AppController : IDisposable
         IpcSignal.Listen(() => _ui.BeginInvoke(ShowSettings));
         IpcSignal.Listen(() => _ui.BeginInvoke(ShowLyricsWindow), IpcSignal.Lyrics);
         // Windows' own Run entry is the truth (the installer may have set it), not the saved setting.
+        // The registry is the truth for "Start with Windows", except right after the default setup changed it.
+        if (Settings.StartWithWindows && !Autostart.IsOn()) Autostart.Apply(true);
         Settings.StartWithWindows = Autostart.IsOn();
         if (openSettings) ShowSettings();
         if (Spotify.LoggedIn) _ = Spotify.LoadProfileAsync(CancellationToken.None);

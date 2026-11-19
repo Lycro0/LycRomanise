@@ -24,28 +24,28 @@ public sealed class SourceEntry
 public sealed class AppSettings
 {
     // ---- Look ----
-    public StripStyle StripStyle { get; set; } = StripStyle.Classic;
-    public double WordLift { get; set; }
-    public bool WordGlow { get; set; }
-    public string LookPreset { get; set; } = "Classic";
+    public StripStyle StripStyle { get; set; } = StripStyle.Minimal;
+    public double WordLift { get; set; } = 4;
+    public bool WordGlow { get; set; } = true;
+    public string LookPreset { get; set; } = "Minimal";
     public LyricsMotion LyricsMotion { get; set; } = LyricsMotion.AppleMusic;
     /// <summary>The full lyrics window's background: the blurred cover, or plain black.</summary>
     public LyricsBackground LyricsBackground { get; set; } = LyricsBackground.Cover;
     /// <summary>Hide the full lyrics window's buttons while the mouse is still.</summary>
     public bool LyricsAutoHideTools { get; set; } = true;
     public bool LyricsPanelHidden { get; set; }
-    public string UnsungColor { get; set; } = "#FFE14D";
-    public string SungColor { get; set; } = "#FF3D9A";
-    public string NextLineColor { get; set; } = "#FFE14D";
+    public string UnsungColor { get; set; } = "#B3FFFFFF";
+    public string SungColor { get; set; } = "#FFFFFF";
+    public string NextLineColor { get; set; } = "#80FFFFFF";
     public string OutlineColor { get; set; } = "#000000";
-    public string SubColor { get; set; } = "#E6FFFFFF";           // romanization / translation under the line
-    public string BackgroundColor { get; set; } = "#101014";
+    public string SubColor { get; set; } = "#B3FFFFFF";           // romanization / translation under the line
+    public string BackgroundColor { get; set; } = "#1C1C24";
     public double BackgroundOpacity { get; set; } = 0.0;           // 0 = see-through strip, text only
-    public double CornerRadius { get; set; } = 16;
+    public double CornerRadius { get; set; } = 22;
     public string FontFamily { get; set; } = "Segoe UI Variable Display";
-    public double FontSize { get; set; } = 34;
-    public bool Bold { get; set; } = true;
-    public double OutlineWidth { get; set; } = 3;
+    public double FontSize { get; set; } = 28;
+    public bool Bold { get; set; } = false;
+    public double OutlineWidth { get; set; } = 1.5;
     public bool Glow { get; set; } = true;
     public DisplayMode Display { get; set; } = DisplayMode.RomanizedOnly;
     public bool ShowTranslation { get; set; } = false;
@@ -53,14 +53,13 @@ public sealed class AppSettings
     public bool ShowNextLine { get; set; } = true;
     public bool ShowBackingVocals { get; set; } = true;
     public bool ShowTitleCard { get; set; } = true;
-    /// <summary>Off by default (new key, so older saved "on" values are not carried over).</summary>
-    [System.Text.Json.Serialization.JsonPropertyName("ShowLyricsSource")]
-    public bool ShowSourceCredit { get; set; }
+    /// <summary>No longer an option: the source is never shown by choice (only where a source requires it).</summary>
+    [JsonIgnore] public bool ShowSourceCredit => false;
     public bool SmoothSweep { get; set; } = true;
     public ThemeChoice Theme { get; set; } = ThemeChoice.Dark;
 
     // ---- Window ----
-    public double StripWidth { get; set; } = 900;
+    public double StripWidth { get; set; } = 680;
     public double? Left { get; set; }
     public double? Top { get; set; }
     public bool Locked { get; set; }
@@ -82,13 +81,13 @@ public sealed class AppSettings
     [JsonPropertyName("SpicyKeyProtected")] public string? SpicyKeyProtected { get; set; }
 
     // ---- Web / OBS ----
-    public bool WebEnabled { get; set; }
+    public bool WebEnabled { get; set; } = true;
     public int WebPort { get; set; } = 8765;
     public bool HideDesktopStrip { get; set; }
     /// <summary>Hide the strip while the full lyrics window is open (and not minimized).</summary>
     public bool HideStripWithLyricsWindow { get; set; } = true;
     public bool NowPlayingFile { get; set; } = true;
-    public NowPlayingFormat NowPlayingFormat { get; set; } = NowPlayingFormat.ArtistTitle;
+    public NowPlayingFormat NowPlayingFormat { get; set; } = NowPlayingFormat.Title;
 
     // ---- Spotify ----
     public string? SpotifyClientId { get; set; }
@@ -123,7 +122,7 @@ public sealed class AppSettings
         : Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(v.Trim()), null, DataProtectionScope.CurrentUser));
 
     // ---- General ----
-    public bool StartWithWindows { get; set; }
+    public bool StartWithWindows { get; set; } = true;
     public bool GlobalHotkeys { get; set; } = true;
     public bool CheckUpdates { get; set; } = true;
     public string? SkippedVersion { get; set; }
@@ -182,7 +181,14 @@ public sealed class AppSettings
             s = Salvage(File.ReadAllText(Paths.Settings));
         }
         if (first) s.ImportFromV1();
+        else if (s.DefaultsVersion < CurrentDefaults)
+        {
+            s.ApplyCurrentDefaults();
+            Log.Info($"settings: updated to the v{CurrentDefaults} default setup");
+        }
+        s.DefaultsVersion = CurrentDefaults;
         s.Sanitize();
+        if (!first) s.Save();
         return s;
     }
 
@@ -204,6 +210,35 @@ public sealed class AppSettings
             return JsonSerializer.Deserialize<AppSettings>(kept.ToJsonString(), Json) ?? new();
         }
         catch { return new(); }
+    }
+
+    /// <summary>Raised when the default setup changes; existing installs then take the new one once.</summary>
+    public const int CurrentDefaults = 3;
+    // 0 in files written before this existed, so those installs take the default setup once.
+    public int DefaultsVersion { get; set; }
+
+    /// <summary>The settings that make up the default setup (look, display and behaviour). Personal state is not
+    /// touched: strip and window positions, the lock, per-song timing and choices, Spotify login, keys, folders.</summary>
+    static readonly string[] SetupSettings =
+    {
+        nameof(StripStyle), nameof(WordLift), nameof(WordGlow), nameof(LookPreset), nameof(LyricsMotion), nameof(LyricsBackground),
+        nameof(LyricsAutoHideTools), nameof(UnsungColor), nameof(SungColor), nameof(NextLineColor), nameof(OutlineColor), nameof(SubColor),
+        nameof(BackgroundColor), nameof(BackgroundOpacity), nameof(CornerRadius), nameof(FontFamily), nameof(FontSize), nameof(Bold),
+        nameof(OutlineWidth), nameof(Glow), nameof(Display), nameof(ShowTranslation), nameof(TranslationLanguage), nameof(ShowNextLine),
+        nameof(ShowBackingVocals), nameof(ShowTitleCard), nameof(SmoothSweep), nameof(Theme), nameof(StripWidth), nameof(HideLockIcon),
+        nameof(ShowInTaskbar), nameof(Align), nameof(HideWhenPaused), nameof(PreferWordSync), nameof(WebEnabled), nameof(HideDesktopStrip),
+        nameof(HideStripWithLyricsWindow), nameof(NowPlayingFile), nameof(NowPlayingFormat), nameof(PrefetchNext), nameof(StartWithWindows),
+        nameof(GlobalHotkeys), nameof(CheckUpdates), nameof(OnlyMusicApps),
+    };
+
+    void ApplyCurrentDefaults()
+    {
+        var d = new AppSettings();
+        foreach (var name in SetupSettings)
+        {
+            var p = typeof(AppSettings).GetProperty(name)!;
+            p.SetValue(this, p.GetValue(d));
+        }
     }
 
     public void Save()

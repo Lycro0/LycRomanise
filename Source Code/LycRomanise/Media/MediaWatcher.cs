@@ -124,8 +124,9 @@ public sealed class MediaWatcher : IDisposable
 
         var artist = props.Artist ?? "";
         var album = props.AlbumTitle ?? "";
-        // Apple Music puts "Artist — Album" in the artist field.
-        int dash = artist.IndexOf(" — ", StringComparison.Ordinal);
+        // Apple Music puts "Artist - Album" in the artist field, joined with an em dash (U+2014), so look for that character.
+        string AppleJoin = " " + (char)0x2014 + " ";
+        int dash = artist.IndexOf(AppleJoin, StringComparison.Ordinal);
         if (dash > 0 && session.SourceAppUserModelId.Contains("Apple", StringComparison.OrdinalIgnoreCase))
         {
             if (album.Length == 0) album = artist[(dash + 3)..];

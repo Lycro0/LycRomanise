@@ -281,7 +281,7 @@ static class SelfTest
                 ("extremes", "{\"FontSize\":99999,\"StripWidth\":-5,\"WebPort\":1,\"BackgroundOpacity\":7,\"GlobalOffsetMs\":999999999}"),
                 ("wrong types", "{\"FontSize\":\"big\",\"Locked\":\"yes\"}"),
                 ("unknown enum", "{\"StripStyle\":\"Fancy\",\"Theme\":\"Purple\"}"),
-                ("one bad among good", "{\"FontSize\":44,\"StripStyle\":\"Fancy\",\"WebPort\":9000}"),
+                ("one bad among good", "{\"DefaultsVersion\":3,\"FontSize\":44,\"StripStyle\":\"Fancy\",\"WebPort\":9000}"),
                 ("bad colours", "{\"UnsungColor\":\"notacolour\",\"SungColor\":\"#12\"}"),
                 ("null lists", "{\"Sources\":null,\"SongOffsets\":null}"),
             })
@@ -296,6 +296,23 @@ static class SelfTest
                     Check($"settings {name} loads", s != null && s.Sources.Count >= 10 && s.FontSize is >= 12 and <= 120 && s.WebPort is >= 1024 and <= 65535,
                         $"font={s?.FontSize} width={s?.StripWidth} port={s?.WebPort} sources={s?.Sources.Count} layout={s?.StripStyle}");
                 });
+            // An install from before the default setup: it takes the new look once, keeps what is personal.
+            Safe("old install takes the default setup", () =>
+            {
+                File.WriteAllText(path, "{\"StripStyle\":\"Classic\",\"UnsungColor\":\"#FFE14D\",\"FontSize\":44,\"Locked\":true,\"Left\":123,\"Top\":45,\"SongOffsets\":{\"a|b\":500},\"SpotifyClientId\":\"abc\",\"WebEnabled\":false,\"NowPlayingFormat\":\"ArtistTitle\"}");
+                var s1 = AppSettings.Load();
+                Check("old install: look replaced", s1.StripStyle == StripStyle.Minimal && s1.UnsungColor == "#B3FFFFFF" && s1.FontSize == 28 && s1.WebEnabled && s1.NowPlayingFormat == NowPlayingFormat.Title,
+                    $"{s1.StripStyle} {s1.UnsungColor} {s1.FontSize} web={s1.WebEnabled} {s1.NowPlayingFormat}");
+                Check("old install: personal things kept", s1.Locked && s1.Left == 123 && s1.Top == 45 && s1.SongOffsets.Count == 1 && s1.SpotifyClientId == "abc",
+                    $"locked={s1.Locked} left={s1.Left} offsets={s1.SongOffsets.Count} client={s1.SpotifyClientId}");
+                s1.FontSize = 50; s1.Save();
+                var s2 = AppSettings.Load();
+                Check("after that, the user's own changes stay", s2.FontSize == 50, $"font={s2.FontSize}");
+                File.Delete(path);
+                var s3 = AppSettings.Load();
+                Check("fresh install starts with the default setup", s3.StripStyle == StripStyle.Minimal && s3.WordLift == 4 && s3.WordGlow && !s3.Bold && !s3.Locked,
+                    $"{s3.StripStyle} lift={s3.WordLift} glow={s3.WordGlow} bold={s3.Bold} width={s3.StripWidth} locked={s3.Locked}");
+            });
         }
         finally
         {

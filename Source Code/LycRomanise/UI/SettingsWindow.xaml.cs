@@ -457,7 +457,6 @@ public partial class SettingsWindow : Window
         p.Children.Add(Card("Backing vocals", "The (oh, yeah) sung under a line, where the source has them.", Toggle(_s.ShowBackingVocals, v => _s.ShowBackingVocals = v, true), ""));
         p.Children.Add(Card("Next line preview", null, Toggle(_s.ShowNextLine, v => _s.ShowNextLine = v), ""));
         p.Children.Add(Card("Song title card", "Artist and song for a few seconds when a song starts.", Toggle(_s.ShowTitleCard, v => _s.ShowTitleCard = v), ""));
-        p.Children.Add(Card("Show where lyrics came from", "In the full lyrics window and web view. The desktop strip never shows it.", Toggle(_s.ShowSourceCredit, v => _s.ShowSourceCredit = v, true), ""));
         return p;
     }
 
