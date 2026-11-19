@@ -3,7 +3,7 @@
 ; The AppId is the same as v1.x, so installing v2 upgrades an existing install in place.
 #define AppName "LycRomanise"
 #ifndef AppVersion
-  #define AppVersion "2.1.1"
+  #define AppVersion "2.2.0"
 #endif
 
 [Setup]
@@ -51,7 +51,7 @@ Name: "{group}\{#AppName} lyrics"; Filename: "{app}\LycRomanise.exe"; Parameters
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\LycRomanise.exe"; Tasks: desktopicon
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LycRomanise Modern"; ValueData: """{app}\LycRomanise.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LycRomanise"; ValueData: """{app}\LycRomanise.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "{app}\LycRomanise.exe"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
@@ -87,16 +87,32 @@ begin
   ShellExec('runas', Uninstaller, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-{ v1 started with Windows under the value "LycRomanise"; keep that choice, pointing at v2. }
+{ Start-with-Windows used the value "LycRomanise" (v1) and then "LycRomanise Modern" (v2.0-2.1).
+  Keep the user's choice under "LycRomanise", pointing at this install. }
 procedure MoveLegacyAutostart;
 var
   Old: String;
+  Was: Boolean;
 begin
-  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise', Old) then
+  Was := RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise', Old);
+  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise Modern', Old) then
   begin
-    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise');
-    RegWriteStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise Modern', '"' + ExpandConstant('{app}\LycRomanise.exe') + '"');
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise Modern');
+    Was := True;
   end;
+  if Was then
+    RegWriteStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'LycRomanise', '"' + ExpandConstant('{app}\LycRomanise.exe') + '"');
+end;
+
+{ v2.0-2.1 kept settings in %APPDATA%\LycRomanise Modern; it is now %APPDATA%\LycRomanise. The app also
+  merges the two on start, for portable copies. }
+procedure MoveDataFolder;
+var
+  OldDir, NewDir: String;
+begin
+  OldDir := ExpandConstant('{userappdata}\LycRomanise Modern');
+  NewDir := ExpandConstant('{userappdata}\LycRomanise');
+  if DirExists(OldDir) and not DirExists(NewDir) then RenameFile(OldDir, NewDir);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -104,6 +120,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     MoveLegacyAutostart;
+    MoveDataFolder;
     RemoveLegacyInstall;
   end;
 end;
@@ -119,4 +136,4 @@ begin
 end;
 
 [UninstallDelete]
-; Settings, cache and logs live in %APPDATA%\LycRomanise Modern and are kept on uninstall.
+; Settings, cache and logs live in %APPDATA%\LycRomanise and are kept on uninstall.

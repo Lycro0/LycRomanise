@@ -32,6 +32,22 @@ public sealed class LyricsChain
             new NetEaseSource(), new LrcLibSource(), new QQMusicSource(), new KuGouSource(), new GeniusSource(),
         };
         All = list.ToDictionary(s => s.Key);
+        ForgetLooseNetEaseMatches();
+    }
+
+    /// <summary>Before 2.2, NetEase matched on artist and length only and could cache another song's lyrics.
+    /// Drop its cached answers once so those songs are looked up again.</summary>
+    static void ForgetLooseNetEaseMatches()
+    {
+        var marker = Path.Combine(Paths.Cache, ".netease-title-check");
+        if (File.Exists(marker)) return;
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(Paths.Cache, "*.json"))
+                if (File.ReadAllText(f).Contains("\"netease\"", StringComparison.OrdinalIgnoreCase)) File.Delete(f);
+            File.WriteAllText(marker, "");
+        }
+        catch (Exception ex) { Log.Error("cache cleanup", ex); }
     }
 
     static int Rank(LyricsResult? r) => r == null ? -1 : r.Instrumental ? 0 : (int)r.Timing + 1;

@@ -180,6 +180,8 @@ public sealed class AppController : IDisposable
             if (hasSong) BeginTrack(s!);
             else ClearTrack();
         }
+        // Title and artist can change without the song changing (players fill them in a moment apart).
+        WriteNowPlaying(NowPlayingTextFor(s));
         UpdateVisibility();
         Web.Notify();
     }
@@ -215,12 +217,7 @@ public sealed class AppController : IDisposable
         Overlay.Karaoke.SetLyrics(_display, true, s.DurationMs, null);
         Overlay.Karaoke.ShowTitleCard(Settings.ShowTitleCard ? $"{s.Artist} — {s.Title}" : null);
         Overlay.SetCredit(null);
-        WriteNowPlaying(Settings.NowPlayingFormat switch
-        {
-            NowPlayingFormat.TitleArtist => $"{s.Title} - {s.Artist}",
-            NowPlayingFormat.Title => s.Title,
-            _ => $"{s.Artist} - {s.Title}",
-        });
+        WriteNowPlaying(NowPlayingTextFor(s));
         _settingsWindow?.RefreshSongInfo();
         Cover = null;
         TrackChanged?.Invoke();
@@ -459,7 +456,7 @@ public sealed class AppController : IDisposable
         updated.LyricsMaximized = Settings.LyricsMaximized;
         Settings = updated;
         SaveSettings();
-        if (themeChanged) Theme.Apply(Settings.Theme);
+        if (themeChanged) { Theme.Apply(Settings.Theme); if (_settingsWindow != null) Theme.Paint(_settingsWindow); }
         if (autostartChanged) Autostart.Apply(Settings.StartWithWindows);
         if (hotkeysChanged) ApplyHotkeys();
         _lyricsWindow?.ApplySettings();
@@ -471,6 +468,8 @@ public sealed class AppController : IDisposable
         }
         if (sourcesChanged) Refetch(skipCache: false);
         else if (lyricsAffected) Reprepare();
+        _nowPlayingText = null!;   // format or switch changed: write again
+        WriteNowPlaying(NowPlayingTextFor(Media.Current));
         UpdateVisibility();
         Tray?.Refresh();
         // A change from the tray or a hotkey: the open Settings window must not save its older copy over it.
@@ -532,12 +531,38 @@ public sealed class AppController : IDisposable
     }
 
     // ------------------------------------------------------------------ OBS text file
+    string _nowPlayingWanted = "";
+    System.Windows.Threading.DispatcherTimer? _nowPlayingRetry;
+
+    string NowPlayingTextFor(MediaState? s) => s == null || MediaWatcher.IsAdOrDj(s) ? "" : Settings.NowPlayingFormat switch
+    {
+        NowPlayingFormat.TitleArtist => s.Artist.Length > 0 ? $"{s.Title} - {s.Artist}" : s.Title,
+        NowPlayingFormat.Title => s.Title,
+        _ => s.Artist.Length > 0 ? $"{s.Artist} - {s.Title}" : s.Title,
+    };
+
+    /// <summary>Keeps LycRomanise.txt in step with what is playing. Written whole and swapped in, so OBS
+    /// never reads half a file; if OBS has it locked, tried again until it goes through.</summary>
     void WriteNowPlaying(string text)
     {
-        if (!Settings.NowPlayingFile || text == _nowPlayingText) return;
-        _nowPlayingText = text;
-        try { File.WriteAllText(Path.Combine(Paths.Data, "LycRomanise.txt"), text); }
-        catch (Exception ex) { Log.Error("now playing file", ex); }
+        if (!Settings.NowPlayingFile) return;
+        _nowPlayingWanted = text;
+        if (text == _nowPlayingText) return;
+        try
+        {
+            var path = Path.Combine(Paths.Data, "LycRomanise.txt");
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, text, new System.Text.UTF8Encoding(true));   // BOM: OBS reads Korean/Japanese right
+            File.Move(tmp, path, true);
+            _nowPlayingText = text;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("now playing file", ex);
+            _nowPlayingRetry ??= new System.Windows.Threading.DispatcherTimer(TimeSpan.FromSeconds(1),
+                System.Windows.Threading.DispatcherPriority.Background, (_, _) => { _nowPlayingRetry!.Stop(); WriteNowPlaying(_nowPlayingWanted); }, _ui);
+            _nowPlayingRetry.Stop(); _nowPlayingRetry.Start();
+        }
     }
 
     public void Quit()
@@ -564,7 +589,7 @@ public static class Autostart
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey);
-            return key?.GetValue("LycRomanise Modern") != null;
+            return key?.GetValue("LycRomanise") != null;
         }
         catch { return false; }
     }
@@ -575,8 +600,9 @@ public static class Autostart
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true);
             if (key == null) return;
-            if (on) key.SetValue("LycRomanise Modern", $"\"{Environment.ProcessPath}\"");
-            else if (key.GetValue("LycRomanise Modern") != null) key.DeleteValue("LycRomanise Modern");
+            key.DeleteValue("LycRomanise Modern", false);
+            if (on) key.SetValue("LycRomanise", $"\"{Environment.ProcessPath}\"");
+            else if (key.GetValue("LycRomanise") != null) key.DeleteValue("LycRomanise");
         }
         catch (Exception ex) { Log.Error("autostart", ex); }
     }

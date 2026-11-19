@@ -3,19 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b0b10">
+<meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>LycRomanise</title>
 <style>
   :root { --dim: rgba(255,255,255,.38); --lift: 2.5px; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0b10; color: #fff;
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff;
     font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "SF Pro Display", "Hiragino Sans", "Noto Sans CJK JP", "Malgun Gothic", sans-serif;
     -webkit-font-smoothing: antialiased; }
 
   /* The cover, blurred and drifting behind everything. */
-  #bg { position: fixed; inset: -25%; z-index: 0; background: linear-gradient(135deg, #3b1f4f, #7a1f4f 55%, #2a1830);
-        transition: opacity 1s; }
+  /* Black and white: plain black, a faint light at the top, a hint of red at the bottom. */
+  #bg { position: fixed; inset: 0; z-index: 0; background: radial-gradient(ellipse at 50% -10%, rgba(255,255,255,.07), transparent 60%),
+        radial-gradient(ellipse at 50% 120%, rgba(229,38,59,.10), transparent 55%), #000; }
+  #bg .art { display: none !important; }
   #bg .art { position: absolute; inset: 0; background-size: cover; background-position: center;
              filter: blur(90px) saturate(1.5); opacity: 0; transition: opacity 1.2s; }
   #bg .art.on { opacity: .95; }
@@ -24,17 +26,17 @@
   #bg .a2.on { opacity: .45; }
   @keyframes drift  { from { transform: scale(1.05) rotate(-6deg); } to { transform: scale(1.3) rotate(8deg); } }
   @keyframes drift2 { from { transform: scale(1.4) rotate(12deg) translate(4%, -3%); } to { transform: scale(1.1) rotate(-10deg) translate(-4%, 3%); } }
-  #shade { position: fixed; inset: 0; z-index: 1; background: linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,.72)); }
+  #shade { display: none; }
 
   #app { position: relative; z-index: 2; height: 100%; display: grid; grid-template-columns: minmax(300px, .82fr) 1.18fr; }
   #player { display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 40px 24px 40px 48px; }
   #player .inner { width: min(400px, 34vw); }
   #cover { width: 100%; aspect-ratio: 1; border-radius: 14px; background: rgba(255,255,255,.12) center/cover;
-           box-shadow: 0 24px 60px rgba(0,0,0,.45); }
+           box-shadow: 0 24px 60px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08); }
   #title { margin-top: 26px; font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #artist { margin-top: 2px; font-size: 18px; color: rgba(255,255,255,.7); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #bar { margin-top: 18px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; }
-  #fill { height: 100%; width: 0; background: rgba(255,255,255,.9); border-radius: 3px; }
+  #bar { margin-top: 18px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.14); overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #e5263b; border-radius: 3px; }
   #times { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: rgba(255,255,255,.6); font-variant-numeric: tabular-nums; }
   #credit { margin-top: 18px; font-size: 11px; color: rgba(255,255,255,.5); }
 

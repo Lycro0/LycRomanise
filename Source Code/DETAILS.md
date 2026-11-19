@@ -1,4 +1,4 @@
-# LycRomanise: full details (v2.0)
+# LycRomanise: full details (v2.2)
 
 The short version is in [README.md](../README.md). This page has everything else.
 
@@ -82,7 +82,7 @@ LycRomanise checks GitHub releases at start-up and every six hours. An installed
 
 ## Files
 
-Settings, the lyrics cache and logs are in `%APPDATA%\LycRomanise Modern`. The song title file for OBS is `LycRomanise.txt` there too. Uninstalling keeps them.
+Settings, the lyrics cache and logs are in `%APPDATA%\LycRomanise`. The song title file for OBS is `LycRomanise.txt` there too. Uninstalling keeps them. (Versions 2.0 and 2.1 used `%APPDATA%\LycRomanise Modern`; 2.2 moves everything across on first start.)
 
 ## Troubleshooting
 

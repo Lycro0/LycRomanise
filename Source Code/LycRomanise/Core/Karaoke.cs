@@ -162,6 +162,15 @@ public static class Normalize
         return name.Length > 0 && lead.Length > 0 && (name.Contains(lead) || lead.Contains(name));
     }
 
+    /// <summary>Is a catalog's title the same song as ours? Equal once cleaned, or one is the other plus a
+    /// suffix ("YOLO" and "YOLO (Japanese ver.)" are not the same, but "Song" and "Song - 2011 Remaster" are).</summary>
+    public static bool SameTitle(string? found, string? wanted)
+    {
+        string a = MatchKey(CleanTitle(found ?? "")), b = MatchKey(CleanTitle(wanted ?? ""));
+        if (a.Length == 0 || b.Length == 0) return false;
+        return a == b;
+    }
+
     /// <summary>The title without " - Remastered 2011", "(feat. X)" and the like, for name searches.</summary>
     public static string CleanTitle(string title)
     {

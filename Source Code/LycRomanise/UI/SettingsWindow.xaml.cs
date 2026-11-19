@@ -27,7 +27,8 @@ public partial class SettingsWindow : Window
         _app = app;
         _s = app.Settings.Copy();
         InitializeComponent();
-        VersionText.Text = "Modern · v" + typeof(App).Assembly.GetName().Version?.ToString(3);
+        Theme.Paint(this);
+        VersionText.Text = "v" + typeof(App).Assembly.GetName().Version?.ToString(3);
         _debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
         _debounce.Tick += (_, _) => { _debounce.Stop(); Commit(); };
 
@@ -735,7 +736,7 @@ public partial class SettingsWindow : Window
         p.Children.Add(Wide(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap, LineHeight = 20,
-            Text = "LycRomanise Modern — synced, romanized lyrics on your desktop for whatever Spotify, Apple Music or any player is playing.\n\n" +
+            Text = "LycRomanise — synced, romanized lyrics on your desktop for whatever Spotify, Apple Music or any player is playing.\n\n" +
                    "Lyrics come from Spicy Lyrics, BiniLyrics, your imported files, Musixmatch, Unison, NetEase Cloud Music, LRCLIB, QQ Music, KuGou and Genius. " +
                    "Not affiliated with any of them, or with Spotify, Apple or Lyricify.\n\nBuilt with .NET and WPF; renders on the GPU and sleeps when nothing is playing.",
         }));

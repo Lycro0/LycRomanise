@@ -83,7 +83,7 @@ public sealed class WebServer
         {
             v = _version,
             synced = r?.Synced ?? true,
-            credit = r?.HasLines == true ? r.Provider : null,
+            credit = r?.HasLines == true && (_app.Settings.ShowSourceCredit || r.CreditRequired) ? r.Provider : null,
             lines = lines.Select(l => new { m = W(l.Main), sub = W(l.Sub), b = W(l.Backing), tr = l.Translation, a = l.Align == LineAlign.Trailing ? 1 : 0 }),
         });
     }

@@ -9,6 +9,9 @@ namespace LycRomanise.Core;
 public static class Paths
 {
     public static readonly string Data = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LycRomanise");
+    /// <summary>Where v2.0 to v2.1 kept everything; moved into <see cref="Data"/> on start.</summary>
+    public static readonly string OldData = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LycRomanise Modern");
     public static string Settings => Path.Combine(Data, "settings.json");
     public static string Cache => Path.Combine(Data, "lyrics-cache");
@@ -17,11 +20,40 @@ public static class Paths
 
     static Paths()
     {
+        MigrateOldFolder();
         Directory.CreateDirectory(Data);
         Directory.CreateDirectory(Cache);
         Directory.CreateDirectory(Logs);
         Directory.CreateDirectory(DefaultImported);
     }
+
+    static void MigrateOldFolder()
+    {
+        try
+        {
+            if (!Directory.Exists(OldData)) return;
+            if (!Directory.Exists(Data)) { Directory.Move(OldData, Data); return; }
+            MergeInto(OldData, Data);
+            Directory.Delete(OldData, true);
+        }
+        catch { /* a file in use: try again next start */ }
+    }
+
+    static void MergeInto(string from, string to)
+    {
+        Directory.CreateDirectory(to);
+        foreach (var f in Directory.GetFiles(from))
+        {
+            var dest = Path.Combine(to, Path.GetFileName(f));
+            if (!File.Exists(dest)) File.Move(f, dest);
+        }
+        foreach (var d in Directory.GetDirectories(from)) MergeInto(d, Path.Combine(to, Path.GetFileName(d)));
+    }
+
+    /// <summary>A path inside the old folder, pointed at the same place in the new one.</summary>
+    public static string FromOld(string path) =>
+        path.StartsWith(OldData + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || path.Equals(OldData, StringComparison.OrdinalIgnoreCase)
+            ? Data + path[OldData.Length..] : path;
 
     public static void WriteAtomic(string path, string text)
     {

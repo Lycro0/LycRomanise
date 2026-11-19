@@ -47,9 +47,11 @@ public sealed class AppSettings
     public bool ShowNextLine { get; set; } = true;
     public bool ShowBackingVocals { get; set; } = true;
     public bool ShowTitleCard { get; set; } = true;
-    public bool ShowSourceCredit { get; set; } = true;
+    /// <summary>Off by default (new key, so older saved "on" values are not carried over).</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("ShowLyricsSource")]
+    public bool ShowSourceCredit { get; set; }
     public bool SmoothSweep { get; set; } = true;
-    public ThemeChoice Theme { get; set; } = ThemeChoice.System;
+    public ThemeChoice Theme { get; set; } = ThemeChoice.Dark;
 
     // ---- Window ----
     public double StripWidth { get; set; } = 900;
@@ -224,5 +226,6 @@ public sealed class AppSettings
         SongOffsets ??= new();
         SongSourceOverride ??= new();
         if (string.IsNullOrWhiteSpace(ImportedFolder)) ImportedFolder = Paths.DefaultImported;
+        ImportedFolder = Paths.FromOld(ImportedFolder);
     }
 }

@@ -1,13 +1,23 @@
-# LycRomanise
-
-Synced lyrics on your desktop for whatever is playing on Spotify, Apple Music or any other player, with **romanized lyrics** for Korean, Japanese and Chinese songs, plus a full-screen, Apple Music-style lyrics view.
+<p align="center">
+  <img src="Source%20Code/assets/LycRomanise-Icon.png" alt="LycRomanise icon" width="128">
+</p>
+<h1 align="center">LycRomanise</h1>
+<p align="center">
+  Synced, word-by-word lyrics on your desktop for whatever is playing, with <b>romanized lyrics</b> for Korean, Japanese and Chinese songs.<br>
+  Works with Spotify, Apple Music and any other player.
+</p>
+<p align="center">
+  <a href="https://github.com/Lycro0/LycRomanise/releases/latest"><b>Download for Windows</b></a> ·
+  <a href="Source%20Code/assets/LycRomanise-Trailer.mp4">Watch the trailer</a> ·
+  <a href="Source%20Code/DETAILS.md">Full details</a>
+</p>
 
 <p align="center">
-  <a href="Source%20Code/assets/LycRomanise-Preview.mp4">
-    <img src="Source%20Code/assets/LycRomanise-Preview.gif" alt="LycRomanise showing synced, romanized lyrics on the desktop" width="100%">
+  <a href="Source%20Code/assets/LycRomanise-Trailer.mp4">
+    <img src="Source%20Code/assets/LycRomanise-Preview.gif" alt="LycRomanise trailer: the lyrics strip, nine looks, the full lyrics window, the web view and OBS" width="100%">
   </a>
   <br>
-  <sub>Click the preview to watch the full tour as a video: every look, the full lyrics window, the web view and the OBS page.</sub>
+  <sub>Click the preview to watch the full trailer with sound.</sub>
 </p>
 
 > **v2 is a full rewrite.** LycRomanise is now a native Windows app written in C# / .NET 10 instead of Python.

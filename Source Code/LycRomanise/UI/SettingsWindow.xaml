@@ -12,19 +12,10 @@
         <!-- Sidebar -->
         <DockPanel Grid.Column="0" Margin="10,14,6,12">
             <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="10,0,0,18">
-                <Border Width="34" Height="34" CornerRadius="9">
-                    <Border.Background>
-                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                            <GradientStop Color="#FFE14D" Offset="0"/>
-                            <GradientStop Color="#FF3D9A" Offset="1"/>
-                        </LinearGradientBrush>
-                    </Border.Background>
-                    <TextBlock Text="&#xE8D6;" FontFamily="{StaticResource Icons}" FontSize="17" Foreground="White"
-                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                </Border>
+                <Image Source="/Assets/logo.png" Width="34" Height="34" RenderOptions.BitmapScalingMode="HighQuality"/>
                 <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
                     <TextBlock Text="LycRomanise" FontWeight="SemiBold" FontSize="15"/>
-                    <TextBlock x:Name="VersionText" Text="Modern" FontSize="11" Opacity="0.6"/>
+                    <TextBlock x:Name="VersionText" Text="" FontSize="11" Opacity="0.6"/>
                 </StackPanel>
             </StackPanel>
             <StackPanel DockPanel.Dock="Bottom">
@@ -36,8 +27,8 @@
                             <Border x:Name="Card" CornerRadius="10" Padding="14,12">
                                 <Border.Background>
                                     <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                        <GradientStop Color="#FFFF3D9A" Offset="0"/>
-                                        <GradientStop Color="#FF8A3DFF" Offset="1"/>
+                                        <GradientStop Color="#FFE5263B" Offset="0"/>
+                                        <GradientStop Color="#FF7A0F1E" Offset="1"/>
                                     </LinearGradientBrush>
                                 </Border.Background>
                                 <Grid>

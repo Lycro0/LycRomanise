@@ -45,6 +45,8 @@ public partial class LyricsWindow : Window
 
         SizeChanged += (_, _) => UpdateLayoutMode();
         StateChanged += (_, _) => UpdateAnimating();
+        // Opened while a song is already playing: start moving as soon as the window is on screen.
+        IsVisibleChanged += (_, _) => UpdateAnimating();
         Closed += (_, _) =>
         {
             app.LyricsChanged -= OnLyrics;
@@ -89,7 +91,7 @@ public partial class LyricsWindow : Window
         if (r == null && _app.CurrentQuery != null && _app.CurrentLines.Count == 0) empty = "Looking for lyrics…";
         Page.ShowTranslation = _app.Settings.ShowTranslation;
         Page.SetLyrics(_app.CurrentLines, r?.Synced ?? true, _app.NowPlaying?.DurationMs ?? 0, empty);
-        CreditText.Text = r is { HasLines: true } ? $"Lyrics: {r.Provider}" + (r.Timing == Timing.Word ? " · word synced" : r.Timing == Timing.Line ? " · line synced" : " · not synced") : "";
+        CreditText.Text = r is { HasLines: true } && (_app.Settings.ShowSourceCredit || r.CreditRequired) ? $"Lyrics: {r.Provider}" + (r.Timing == Timing.Word ? " · word synced" : r.Timing == Timing.Line ? " · line synced" : " · not synced") : "";
         UpdateAnimating();
     }
 

@@ -28,7 +28,7 @@ public partial class App : Application
         DispatcherUnhandledException += (_, ex) => { Log.Error("ui", ex.Exception); ex.Handled = true; };
         AppDomain.CurrentDomain.UnhandledException += (_, ex) => Log.Info("FATAL " + ex.ExceptionObject);
         TaskScheduler.UnobservedTaskException += (_, ex) => { Log.Error("task", ex.Exception); ex.SetObserved(); };
-        Log.Info($"--- LycRomanise Modern {typeof(App).Assembly.GetName().Version} starting");
+        Log.Info($"--- LycRomanise {typeof(App).Assembly.GetName().Version} starting");
         _controller = new AppController();
         _controller.Start(openSettings: e.Args.Contains("--settings"));
         if (e.Args.Contains("--lyrics")) _controller.ShowLyricsWindow();

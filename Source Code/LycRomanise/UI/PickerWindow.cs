@@ -23,6 +23,7 @@ public sealed class PickerWindow : Window
         Width = 720;
         Height = 640;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Theme.Paint(this);
         Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/Assets/lyrics-overlay.ico"));
         var root = new DockPanel { Margin = new Thickness(24) };
         var head = new StackPanel();

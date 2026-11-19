@@ -580,6 +580,7 @@ public sealed class NetEaseSource : ILyricsSource
         var found = await Get("search/get", new() { ["s"] = $"{title} {lead}", ["type"] = "1", ["limit"] = "10" }, ct);
         var fitting = found.Json.Dig("result", "songs").Items()
             .Where(s => Math.Abs((int)(s.Dig("duration").Num() / 1000) - q.Seconds) <= 3)
+            .Where(s => Normalize.SameTitle(s.Dig("name").Str(), q.Title))
             .Where(s => s.Dig("artists").Items().Any(a => Normalize.SameArtist(a.Dig("name").Str(), lead)))
             .OrderBy(s => Math.Abs((int)(s.Dig("duration").Num() / 1000) - q.Seconds))
             .Take(3).ToList();
