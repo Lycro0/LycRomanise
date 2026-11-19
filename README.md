@@ -14,7 +14,7 @@
 
 <p align="center">
   <a href="https://youtu.be/kiYvWNL_SuU">
-    <img src="Source%20Code/assets/LycRomanise-Trailer-Preview.webp" alt="LycRomanise trailer: the lyrics strip, fully customisable looks, the full lyrics window, the web view and OBS" width="100%">
+    <img src="Source%20Code/assets/LycRomanise-Trailer-Preview-HQ.webp" alt="LycRomanise trailer: the lyrics strip, fully customisable looks, the full lyrics window, the web view and OBS" width="100%">
   </a>
   <br>
   <sub>Click the preview to watch the full trailer on YouTube.</sub>
