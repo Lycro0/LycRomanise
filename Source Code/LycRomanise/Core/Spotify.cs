@@ -19,7 +19,7 @@ public sealed record SpotifyTrack(
 public sealed record SpotifyNow(SpotifyTrack? Track, long ProgressMs, bool Playing, DateTime At);
 
 /// <summary>Spotify Web API on the user's own login (Authorization Code with PKCE, no secret). Only the
-/// read endpoints are used — what is playing and what is queued — which work on free accounts too.</summary>
+/// read endpoints are used (what is playing and what is queued), and they work on free accounts too.</summary>
 public sealed class SpotifyClient
 {
     public const string RedirectUri = "http://127.0.0.1:43821/callback";

@@ -1,3 +1,4 @@
+using System.Windows.Documents;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
@@ -290,8 +291,11 @@ public partial class SettingsWindow : Window
         var hero = new Border
         {
             CornerRadius = new CornerRadius(12), Padding = new Thickness(24, 20, 24, 20), Margin = new Thickness(0, 0, 0, 8),
-            Background = new LinearGradientBrush(Color.FromArgb(0x55, 0xFF, 0xE1, 0x4D), Color.FromArgb(0x55, 0xFF, 0x3D, 0x9A), 20),
+            // Brand: black into deep red, a thin white edge.
+            Background = new LinearGradientBrush(Color.FromRgb(0x0E, 0x0E, 0x10), Color.FromRgb(0x6E, 0x0B, 0x18), 20),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF)), BorderThickness = new Thickness(1),
         };
+        TextElement.SetForeground(hero, Brushes.White);
         var info = new StackPanel();
         _songTitle = new TextBlock { FontSize = 24, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
         _songInfo = new TextBlock { Opacity = 0.8, Margin = new Thickness(0, 4, 0, 0), TextWrapping = TextWrapping.Wrap };
@@ -453,7 +457,7 @@ public partial class SettingsWindow : Window
         p.Children.Add(Card("Backing vocals", "The (oh, yeah) sung under a line, where the source has them.", Toggle(_s.ShowBackingVocals, v => _s.ShowBackingVocals = v, true), ""));
         p.Children.Add(Card("Next line preview", null, Toggle(_s.ShowNextLine, v => _s.ShowNextLine = v), ""));
         p.Children.Add(Card("Song title card", "Artist and song for a few seconds when a song starts.", Toggle(_s.ShowTitleCard, v => _s.ShowTitleCard = v), ""));
-        p.Children.Add(Card("Show where lyrics came from", "Some sources (Spicy Lyrics) always show their credit.", Toggle(_s.ShowSourceCredit, v => _s.ShowSourceCredit = v, true), ""));
+        p.Children.Add(Card("Show where lyrics came from", "In the full lyrics window and web view. The desktop strip never shows it.", Toggle(_s.ShowSourceCredit, v => _s.ShowSourceCredit = v, true), ""));
         return p;
     }
 
@@ -479,7 +483,7 @@ public partial class SettingsWindow : Window
                 text.Children.Add(new TextBlock { Text = src.Detail, Style = (Style)Application.Current.FindResource("CardHint") });
                 if (entry.Key == "spicy")
                 {
-                    var status = string.IsNullOrEmpty(_s.SpicyKey) ? "Needs a key — add it below" : _app.Chain.Spicy.Status ?? "Key set";
+                    var status = string.IsNullOrEmpty(_s.SpicyKey) ? "Needs a key (add it below)" : _app.Chain.Spicy.Status ?? "Key set";
                     text.Children.Add(new TextBlock { Text = status, FontSize = 12, Margin = new Thickness(0, 2, 0, 0), Foreground = (Brush)FindResource("AccentTextFillColorPrimaryBrush") });
                 }
                 Grid.SetColumn(text, 1);
@@ -618,6 +622,7 @@ public partial class SettingsWindow : Window
         p.Children.Add(Card("Width", null, SliderBox(_s.StripWidth, 400, 2400, 10, "{0:0} px", v => _s.StripWidth = v), ""));
         p.Children.Add(Card("Text alignment", null, Combo(_s.Align, new[] { (StripAlign.Center, "Centre"), (StripAlign.Left, "Left"), (StripAlign.Right, "Right") }, v => _s.Align = v), ""));
         p.Children.Add(Card("Hide while paused", null, Toggle(_s.HideWhenPaused, v => _s.HideWhenPaused = v), ""));
+        p.Children.Add(Card("Hide while the full lyrics window is open", "The strip comes back when you close or minimize it.", Toggle(_s.HideStripWithLyricsWindow, v => _s.HideStripWithLyricsWindow = v), "\uE8A7"));
         p.Children.Add(Card("Taskbar button", "Lets OBS window capture and other tools find the strip.", Toggle(_s.ShowInTaskbar, v => _s.ShowInTaskbar = v), ""));
         p.Children.Add(Card("Reset position", "Back to the top centre of the main screen.", Btn("Reset", () => _app.Overlay.ResetPosition()), ""));
         return p;
@@ -736,7 +741,7 @@ public partial class SettingsWindow : Window
         p.Children.Add(Wide(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap, LineHeight = 20,
-            Text = "LycRomanise — synced, romanized lyrics on your desktop for whatever Spotify, Apple Music or any player is playing.\n\n" +
+            Text = "LycRomanise shows synced, romanized lyrics on your desktop for whatever Spotify, Apple Music or any other player is playing.\n\n" +
                    "Lyrics come from Spicy Lyrics, BiniLyrics, your imported files, Musixmatch, Unison, NetEase Cloud Music, LRCLIB, QQ Music, KuGou and Genius. " +
                    "Not affiliated with any of them, or with Spotify, Apple or Lyricify.\n\nBuilt with .NET and WPF; renders on the GPU and sleeps when nothing is playing.",
         }));

@@ -13,6 +13,7 @@ public enum StripAlign { Center, Left, Right }
 public enum StripStyle { Classic, Modern, Minimal }
 /// <summary>How the full lyrics window moves.</summary>
 public enum LyricsMotion { AppleMusic, Glow, Float, Calm, Snappy }
+public enum LyricsBackground { Cover, Black }
 
 public sealed class SourceEntry
 {
@@ -28,6 +29,11 @@ public sealed class AppSettings
     public bool WordGlow { get; set; }
     public string LookPreset { get; set; } = "Classic";
     public LyricsMotion LyricsMotion { get; set; } = LyricsMotion.AppleMusic;
+    /// <summary>The full lyrics window's background: the blurred cover, or plain black.</summary>
+    public LyricsBackground LyricsBackground { get; set; } = LyricsBackground.Cover;
+    /// <summary>Hide the full lyrics window's buttons while the mouse is still.</summary>
+    public bool LyricsAutoHideTools { get; set; } = true;
+    public bool LyricsPanelHidden { get; set; }
     public string UnsungColor { get; set; } = "#FFE14D";
     public string SungColor { get; set; } = "#FF3D9A";
     public string NextLineColor { get; set; } = "#FFE14D";
@@ -79,6 +85,8 @@ public sealed class AppSettings
     public bool WebEnabled { get; set; }
     public int WebPort { get; set; } = 8765;
     public bool HideDesktopStrip { get; set; }
+    /// <summary>Hide the strip while the full lyrics window is open (and not minimized).</summary>
+    public bool HideStripWithLyricsWindow { get; set; } = true;
     public bool NowPlayingFile { get; set; } = true;
     public NowPlayingFormat NowPlayingFormat { get; set; } = NowPlayingFormat.ArtistTitle;
 
@@ -153,6 +161,7 @@ public sealed class AppSettings
         Converters = { new JsonStringEnumConverter() },
         AllowTrailingCommas = true,
         ReadCommentHandling = JsonCommentHandling.Skip,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
     };
 
     public static AppSettings Load()
@@ -168,11 +177,33 @@ public sealed class AppSettings
         catch (Exception ex)
         {
             Log.Error("settings load", ex);
-            s = new();
+            // Keep the unreadable file, and keep every setting in it that still reads, rather than starting over.
+            try { File.Copy(Paths.Settings, Paths.Settings + $".broken-{DateTime.Now:yyyyMMdd-HHmmss}", true); } catch { }
+            s = Salvage(File.ReadAllText(Paths.Settings));
         }
         if (first) s.ImportFromV1();
         s.Sanitize();
         return s;
+    }
+
+    /// <summary>Reads what it can from a settings file with a bad value in it: each setting is tried on its
+    /// own and the ones that fail keep their defaults.</summary>
+    static AppSettings Salvage(string text)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(text, documentOptions: new() { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip }) is not System.Text.Json.Nodes.JsonObject obj)
+                return new();
+            var kept = new System.Text.Json.Nodes.JsonObject();
+            foreach (var (name, value) in obj.ToList())
+            {
+                var one = new System.Text.Json.Nodes.JsonObject { [name] = value?.DeepClone() };
+                try { JsonSerializer.Deserialize<AppSettings>(one.ToJsonString(), Json); kept[name] = value?.DeepClone(); }
+                catch { Log.Info($"settings: ignored unreadable value for {name}"); }
+            }
+            return JsonSerializer.Deserialize<AppSettings>(kept.ToJsonString(), Json) ?? new();
+        }
+        catch { return new(); }
     }
 
     public void Save()
@@ -181,7 +212,7 @@ public sealed class AppSettings
         catch (Exception ex) { Log.Error("settings save", ex); }
     }
 
-    public AppSettings Copy() => JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(this, Json), Json)!;
+    public AppSettings Copy() { var c = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(this, Json), Json)!; c.Sanitize(); return c; }
 
     /// <summary>On the first start, the colours, size and toggles from LycRomanise 1.x (appearance.json).</summary>
     void ImportFromV1()
@@ -217,6 +248,15 @@ public sealed class AppSettings
         Sources = Sources.Where(e => SourceOrder.Contains(e.Key)).GroupBy(e => e.Key).Select(g => g.First()).ToList();
         foreach (var key in SourceOrder)
             if (Sources.All(e => e.Key != key)) Sources.Add(new SourceEntry { Key = key });
+        static double Ok(double v, double fallback) => double.IsFinite(v) ? v : fallback;
+        WordLift = Math.Clamp(Ok(WordLift, 0), 0, 20);
+        CornerRadius = Math.Clamp(Ok(CornerRadius, 16), 0, 60);
+        LyricsFontSize = Math.Clamp(Ok(LyricsFontSize, 36), 18, 110);
+        LyricsWidth = Math.Clamp(Ok(LyricsWidth, 1180), 520, 10000);
+        LyricsHeight = Math.Clamp(Ok(LyricsHeight, 760), 420, 10000);
+        FontSize = Ok(FontSize, 34); StripWidth = Ok(StripWidth, 900); BackgroundOpacity = Ok(BackgroundOpacity, 0); OutlineWidth = Ok(OutlineWidth, 3);
+        if (Left is double l && !double.IsFinite(l)) Left = null;
+        if (Top is double tp && !double.IsFinite(tp)) Top = null;
         FontSize = Math.Clamp(FontSize, 12, 120);
         StripWidth = Math.Clamp(StripWidth, 300, 4000);
         BackgroundOpacity = Math.Clamp(BackgroundOpacity, 0, 1);

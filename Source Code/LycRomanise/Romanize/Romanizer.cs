@@ -54,9 +54,20 @@ public static class Romanizer
         _ => chunk,
     };
 
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string?), string> _lineCache = new();
+
     public static string Line(string text, string? hint)
     {
         if (!Needs(text)) return text;
+        if (_lineCache.TryGetValue((text, hint), out var known)) return known;
+        var result = LineUncached(text, hint);
+        if (_lineCache.Count > 4000) _lineCache.Clear();
+        _lineCache[(text, hint)] = result;
+        return result;
+    }
+
+    static string LineUncached(string text, string? hint)
+    {
         var lineScript = DetectScript(text);
         var hanAs = lineScript == "ja" || (lineScript == null && hint == "ja") || (lineScript == "zh" && hint == "ja") ? "ja" : "zh";
         // Runs by script; neutral characters between two runs of the same script stay inside it.
@@ -102,17 +113,15 @@ public static class Romanizer
         if (!unspaced)
         {
             var copy = new LyricLine { Start = line.Start, End = line.End, Align = line.Align, Estimated = line.Estimated };
-            foreach (var w in line.Words)
+            // Syllable-timed words (joined pieces) are put back together and romanized as one word, so the sound
+            // changes across syllables (말해줄래 malhaejullae, 멀어 meoreo) come out right.
+            for (int i = 0; i < line.Words.Count;)
             {
-                var r = Line(w.Text, hint);
-                if (w.Joined && copy.Words.Count > 0)
-                {
-                    // A syllable of the same word: keep the whole word's romanization together.
-                    var prev = copy.Words[^1];
-                    prev.Text += r;
-                    prev.End = w.End;
-                }
-                else copy.Words.Add(new LyricWord { Text = r, Start = w.Start, End = w.End });
+                int j = i + 1;
+                while (j < line.Words.Count && line.Words[j].Joined) j++;
+                var whole = string.Concat(line.Words.Skip(i).Take(j - i).Select(w => w.Text));
+                copy.Words.Add(new LyricWord { Text = Line(whole, hint), Start = line.Words[i].Start, End = line.Words[j - 1].End });
+                i = j;
             }
             return copy;
         }

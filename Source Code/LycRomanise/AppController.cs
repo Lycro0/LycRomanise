@@ -35,6 +35,7 @@ public sealed class AppController : IDisposable
     readonly Dispatcher _ui;
     TrackQuery? _query;
     string? _trackKey;
+    int _relooks;
     CancellationTokenSource? _fetch;
     LyricsResult? _result;
     List<DisplayLine> _display = new();
@@ -62,7 +63,7 @@ public sealed class AppController : IDisposable
         Overlay.ApplySettings(Settings);
         Overlay.PlaceInitially(Settings);
         Overlay.Karaoke.SetClock(Clock);
-        Overlay.Karaoke.ShowTitleCard("LycRomanise — play a song");
+        Overlay.Karaoke.ShowTitleCard("LycRomanise: play a song");
         if (!Settings.HideDesktopStrip) Overlay.Show();
         Tray = new TrayIcon(this);
         Media.Changed += s => _ui.BeginInvoke(() => OnMedia(s));
@@ -174,8 +175,18 @@ public sealed class AppController : IDisposable
     {
         bool hasSong = s != null && !MediaWatcher.IsAdOrDj(s);
         var key = hasSong ? s!.TrackKey : null;
+        // Same song, but its real length only arrived now (the player sent the title first): the lookup used the
+        // last song's length and may have found nothing or the wrong lyrics, so look again with the right one.
+        if (hasSong && key == _trackKey && _query != null && s!.DurationMs > 0 && _relooks < 3
+            && Math.Abs((int)Math.Round(s.DurationMs / 1000.0) - _query.Seconds) > 2)
+        {
+            _relooks++;
+            Log.Info($"length changed for {s.Title} ({_query.Seconds}s -> {s.DurationMs / 1000}s): looking again");
+            BeginTrack(s);
+        }
         if (key != _trackKey)
         {
+            _relooks = 0;
             _trackKey = key;
             if (hasSong) BeginTrack(s!);
             else ClearTrack();
@@ -215,7 +226,7 @@ public sealed class AppController : IDisposable
         _display = new();
         CreditRequired = false;
         Overlay.Karaoke.SetLyrics(_display, true, s.DurationMs, null);
-        Overlay.Karaoke.ShowTitleCard(Settings.ShowTitleCard ? $"{s.Artist} — {s.Title}" : null);
+        Overlay.Karaoke.ShowTitleCard(Settings.ShowTitleCard ? $"{s.Artist} - {s.Title}" : null);
         Overlay.SetCredit(null);
         WriteNowPlaying(NowPlayingTextFor(s));
         _settingsWindow?.RefreshSongInfo();
@@ -275,7 +286,9 @@ public sealed class AppController : IDisposable
             if (a.Length == 0 || !(a == b || a.StartsWith(b) || b.StartsWith(a))) return;
             q.SpotifyId = t.Id;
             q.Isrc ??= t.Isrc;
-            if (q.Seconds <= 0) q.Seconds = (int)Math.Round(t.DurationMs / 1000.0);
+            // Spotify's own length is right even when the one Windows reported is still the last song's.
+            int spotSec = (int)Math.Round(t.DurationMs / 1000.0);
+            if (spotSec > 0 && (q.Seconds <= 0 || Math.Abs(spotSec - q.Seconds) > 2)) q.Seconds = spotSec;
             if (q.Album.Length == 0) q.Album = t.Album;
             Log.Info($"spotify: matched {t.Id} ({t.Isrc})");
             if (t.ImageUrl != null) _ = LoadCoverAsync(q, t.ImageUrl, ct);
@@ -309,6 +322,10 @@ public sealed class AppController : IDisposable
     {
         try
         {
+            // Players can send the new title before the new length (a quick skip back): give it a moment to settle,
+            // then take the length as it is now.
+            await Task.Delay(350, ct);
+            if (Media.Current is { DurationMs: > 0 } settled && settled.TrackKey == _trackKey) q.Seconds = (int)Math.Round(settled.DurationMs / 1000.0);
             // Spotify reports the length a moment after the title; wait briefly for it.
             for (int i = 0; i < 6 && q.Seconds <= 0 && !ct.IsCancellationRequested; i++)
             {
@@ -352,9 +369,9 @@ public sealed class AppController : IDisposable
         Overlay.Karaoke.SetLyrics(display, result?.Synced ?? true, Media.Current?.DurationMs ?? q.Seconds * 1000L, credit);
         Overlay.SetCredit(credit);
         if (result == null) Tray?.SetStatus("No lyrics found");
-        else if (result.Instrumental && !result.HasLines) { Tray?.SetStatus("Instrumental"); Overlay.Karaoke.ShowTitleCard($"{q.Artist} — {q.Title}  ·  instrumental"); }
+        else if (result.Instrumental && !result.HasLines) { Tray?.SetStatus("Instrumental"); Overlay.Karaoke.ShowTitleCard($"{q.Artist} - {q.Title}  ·  instrumental"); }
         else Tray?.SetStatus($"{result.Provider} · {result.Timing} sync");
-        if (result == null && Settings.ShowTitleCard) Overlay.Karaoke.ShowTitleCard($"{q.Artist} — {q.Title}  ·  no lyrics found");
+        if (result == null && Settings.ShowTitleCard) Overlay.Karaoke.ShowTitleCard($"{q.Artist} - {q.Title}  ·  no lyrics found");
         Web.Notify(lyricsChanged: true);
         _settingsWindow?.RefreshSongInfo();
         LyricsChanged?.Invoke();
@@ -362,17 +379,21 @@ public sealed class AppController : IDisposable
     }
 
     /// <summary>Romanizes the lines and sets out what each one shows, by the display mode.</summary>
-    static List<DisplayLine> Prepare(LyricsResult r, AppSettings s)
+    internal static List<DisplayLine> Prepare(LyricsResult r, AppSettings s)
     {
         var script = Romanizer.SongScript(r.Lines);
         var list = new List<DisplayLine>(r.Lines.Count);
         foreach (var line in r.Lines)
         {
             LyricLine? roman = null, backingRoman = null;
+            // Korean: our own romanization follows the sound changes; Apple's splits every syllable ("i yu").
+            // And a source's romanization that runs a long line together with no spaces is no help either.
+            // Nor one that left kanji or kana in place ("悲shimanai明日o願ukedo").
+            bool own = script == "ko" || (line.Pronunciation is { } pr && ((pr.Text.Length > 14 && !pr.Text.Contains(' ')) || Romanizer.Needs(pr.Text)));
             if (s.Display != DisplayMode.OriginalOnly && Romanizer.Needs(line.Text))
-                roman = line.Pronunciation ?? Romanizer.ForLine(line, script);
+                roman = (own ? null : line.Pronunciation) ?? Romanizer.ForLine(line, script);
             if (line.Backing != null && s.Display == DisplayMode.RomanizedOnly && Romanizer.Needs(line.Backing.Text))
-                backingRoman = line.Backing.Pronunciation ?? Romanizer.ForLine(line.Backing, script);
+                backingRoman = (own ? null : line.Backing.Pronunciation) ?? Romanizer.ForLine(line.Backing, script);
             var main = s.Display == DisplayMode.RomanizedOnly && roman != null ? roman : line;
             list.Add(new DisplayLine
             {
@@ -423,7 +444,9 @@ public sealed class AppController : IDisposable
         bool playing = m is { Playing: true };
         // While Settings is open and on screen the strip stays up as a preview; minimized or closed, pausing hides it.
         bool previewing = _settingsWindow is { IsVisible: true } w && w.WindowState != WindowState.Minimized && w.IsActive;
-        bool show = !Settings.HideDesktopStrip && (playing || !Settings.HideWhenPaused || previewing);
+        // The full lyrics window on screen takes over from the strip (unless that option is off).
+        bool lyricsUp = Settings.HideStripWithLyricsWindow && _lyricsWindow is { IsVisible: true } lw && lw.WindowState != WindowState.Minimized;
+        bool show = !Settings.HideDesktopStrip && !lyricsUp && (playing || !Settings.HideWhenPaused || previewing);
         if (show && !Overlay.IsVisible) Overlay.Show();
         Overlay.BeginAnimation(UIElement.OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(show ? 1 : 0, TimeSpan.FromMilliseconds(250)));
         if (!show) Overlay.IsHitTestVisible = false; else Overlay.IsHitTestVisible = true;
@@ -482,7 +505,7 @@ public sealed class AppController : IDisposable
         SaveSettings();
         Overlay.ApplyLock();
         Tray?.Refresh();
-        if (locked) Tray?.Toast("Strip locked — unlock it from the tray icon");
+        if (locked) Tray?.Toast("Strip locked. Unlock it from the tray icon.");
     }
 
     public void ShowSettings()
@@ -507,8 +530,10 @@ public sealed class AppController : IDisposable
         if (_lyricsWindow == null)
         {
             _lyricsWindow = new LyricsWindow(this);
-            _lyricsWindow.Closed += (_, _) => _lyricsWindow = null;
+            _lyricsWindow.Closed += (_, _) => { _lyricsWindow = null; UpdateVisibility(); };
+            _lyricsWindow.StateChanged += (_, _) => UpdateVisibility();
             _lyricsWindow.Show();
+            UpdateVisibility();
             OverlayWindow.ShowWindow(new System.Windows.Interop.WindowInteropHelper(_lyricsWindow).Handle, Settings.LyricsMaximized ? 3 : 9);
         }
         _lyricsWindow.Activate();

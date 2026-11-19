@@ -17,6 +17,24 @@ public partial class App : Application
             _ = Probe(e.Args[1], e.Args[2], int.Parse(e.Args[3]), e.Args.Length > 4 ? e.Args[4] : "probe.txt");
             return;
         }
+        if (e.Args.Length >= 3 && e.Args[0] == "--selftest" && e.Args[2] == "app")
+        {
+            // The whole app with fake playback (see SelfTestApp): needs the usual start-up, then the tests.
+            _single = new Mutex(true, "LycRomanise.Modern.SingleInstance", out _);
+            DispatcherUnhandledException += (_, ex) => { Log.Error("ui", ex.Exception); ex.Handled = true; };
+            TaskScheduler.UnobservedTaskException += (_, ex) => { Log.Error("task", ex.Exception); ex.SetObserved(); };
+            _controller = new AppController();
+            _controller.Start(openSettings: false);
+            var outDir = e.Args[1];
+            Dispatcher.InvokeAsync(async () => { await SelfTestApp.RunAsync(_controller, outDir); Shutdown(); }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+        if (e.Args.Length >= 2 && e.Args[0] == "--selftest")
+        {
+            var mode = e.Args.Length > 2 ? e.Args[2] : "all";
+            (mode == "deep" ? SelfTestDeep.RunAsync(e.Args[1]) : SelfTest.RunAsync(e.Args[1], mode)).ContinueWith(_ => Dispatcher.Invoke(Shutdown));
+            return;
+        }
         _single = new Mutex(true, "LycRomanise.Modern.SingleInstance", out bool first);
         if (!first)
         {

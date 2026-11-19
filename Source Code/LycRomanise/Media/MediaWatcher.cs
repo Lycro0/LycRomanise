@@ -75,6 +75,8 @@ public sealed class MediaWatcher : IDisposable
             var state = await ReadAsync();
             bool changed = state?.TrackKey != _last?.TrackKey || state?.Playing != _last?.Playing
                 || state?.AppId != _last?.AppId
+                // The length can arrive after the title (Spotify, on a quick skip back): that is news too.
+                || (state != null && _last != null && Math.Abs(state.DurationMs - _last.DurationMs) > 1500)
                 || (state != null && _last != null && Math.Abs(state.PositionNow() - _last.PositionNow()) > 1200);
             _last = state;
             _failures = 0;

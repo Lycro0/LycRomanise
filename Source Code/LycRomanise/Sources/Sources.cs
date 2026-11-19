@@ -17,7 +17,7 @@ public interface ILyricsSource
 
 static partial class SourceUtil
 {
-    // "作词：…", "Composed by: …", "编曲 : …" — the credits Chinese catalogs put at the top of the lyrics.
+    // The credits Chinese catalogs put at the top of the lyrics: "作词：…", "Composed by: …", "编曲 : …".
     [GeneratedRegex(@"^\s*(作?词|作?曲|词曲|編曲|编曲|作詞|制作人|製作人|制作|監製|监制|混音|母带|和声|和音|吉他|贝斯|鼓|弦乐|录音|錄音|出品|发行|發行|统筹|企划|OP|SP|ISRC|Lyrics?(\s+by)?|Lyricist|Composed\s+by|Composer|Music(\s+by)?|Produced\s+by|Producer|Written\s+by|Arranged\s+by|Arranger|Mixed\s+by|Mastered\s+by|Vocals?\s+by)\s*[:：]", RegexOptions.IgnoreCase)]
     private static partial Regex CreditLine();
 

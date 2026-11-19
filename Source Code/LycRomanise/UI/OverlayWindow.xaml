@@ -22,7 +22,7 @@
         </StackPanel>
 
         <!-- A small unlock pill, kept clickable while the rest of the strip is click-through. -->
-        <TextBlock x:Name="CreditText" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="14,0,0,2"
+        <TextBlock x:Name="CreditText" Visibility="Collapsed" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="14,0,0,2"
                    FontSize="10" Foreground="#99FFFFFF" Opacity="0"/>
     </Grid>
 </Window>

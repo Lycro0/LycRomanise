@@ -50,26 +50,7 @@ public partial class OverlayWindow : Window
         var bg = Theme.ParseColor(s.BackgroundColor, Colors.Black);
         Panel.Background = new SolidColorBrush(Color.FromArgb((byte)(s.BackgroundOpacity * 255), bg.R, bg.G, bg.B));
         Panel.CornerRadius = new CornerRadius(s.CornerRadius);
-        View.SetStyle(new KaraokeStyle
-        {
-            Layout = s.StripStyle,
-            WordLift = s.WordLift,
-            WordGlow = s.WordGlow,
-            Unsung = Theme.ParseColor(s.UnsungColor, Colors.Gold),
-            Sung = Theme.ParseColor(s.SungColor, Colors.HotPink),
-            Next = Theme.ParseColor(s.NextLineColor, Colors.Gold),
-            Outline = Theme.ParseColor(s.OutlineColor, Colors.Black),
-            Sub = Theme.ParseColor(s.SubColor, Colors.White),
-            Typeface = new Typeface(new FontFamily(s.FontFamily + ", Segoe UI, Yu Gothic UI, Malgun Gothic, Microsoft YaHei UI"),
-                FontStyles.Normal, s.Bold ? FontWeights.Bold : FontWeights.SemiBold, FontStretches.Normal),
-            FontSize = s.FontSize,
-            OutlineWidth = s.OutlineWidth,
-            ShowNext = s.ShowNextLine && s.StripStyle != StripStyle.Minimal,
-            ShowTranslation = s.ShowTranslation,
-            ShowBacking = s.ShowBackingVocals,
-            Smooth = s.SmoothSweep,
-            Align = s.Align switch { StripAlign.Left => TextAlignment.Left, StripAlign.Right => TextAlignment.Right, _ => TextAlignment.Center },
-        });
+        View.SetStyle(StyleFor(s));
         View.Effect = s.Glow
             ? new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 14, ShadowDepth = 0, Opacity = 0.55, Color = Theme.ParseColor(s.OutlineColor, Colors.Black), RenderingBias = System.Windows.Media.Effects.RenderingBias.Performance }
             : null;
@@ -77,6 +58,27 @@ public partial class OverlayWindow : Window
         ApplyLock();
         UpdateChrome();
     }
+
+    internal static KaraokeStyle StyleFor(AppSettings s) => new KaraokeStyle
+        {
+            Layout = s.StripStyle,
+            WordGlow = s.WordGlow,
+            Unsung = Theme.ParseColor(s.UnsungColor, Colors.Gold),
+            Sung = Theme.ParseColor(s.SungColor, Colors.HotPink),
+            Next = Theme.ParseColor(s.NextLineColor, Colors.Gold),
+            Outline = Theme.ParseColor(s.OutlineColor, Colors.Black),
+            Sub = Theme.ParseColor(s.SubColor, Colors.White),
+            Typeface = new Typeface(new FontFamily(s.FontFamily + ", Segoe UI, Yu Gothic UI, Malgun Gothic, Microsoft YaHei UI, Segoe UI Symbol, Segoe UI Emoji"),
+                FontStyles.Normal, s.Bold ? FontWeights.Bold : FontWeights.SemiBold, FontStretches.Normal),
+            FontSize = double.IsFinite(s.FontSize) ? Math.Clamp(s.FontSize, 12, 120) : 34,
+            OutlineWidth = double.IsFinite(s.OutlineWidth) ? Math.Clamp(s.OutlineWidth, 0, 10) : 3,
+            WordLift = double.IsFinite(s.WordLift) ? Math.Clamp(s.WordLift, 0, 20) : 0,
+            ShowNext = s.ShowNextLine && s.StripStyle != StripStyle.Minimal,
+            ShowTranslation = s.ShowTranslation,
+            ShowBacking = s.ShowBackingVocals,
+            Smooth = s.SmoothSweep,
+            Align = s.Align switch { StripAlign.Left => TextAlignment.Left, StripAlign.Right => TextAlignment.Right, _ => TextAlignment.Center },
+        };
 
     public void PlaceInitially(AppSettings s)
     {
@@ -143,12 +145,14 @@ public partial class OverlayWindow : Window
             var bg = Theme.ParseColor(_app.Settings.BackgroundColor, Colors.Black);
             Panel.Background = new SolidColorBrush(Color.FromArgb((byte)(_app.Settings.BackgroundOpacity * 255), bg.R, bg.G, bg.B));
         }
-        CreditText.BeginAnimation(OpacityProperty, new DoubleAnimation(show || _app.CreditRequired ? 1 : 0, TimeSpan.FromMilliseconds(160)));
+        // The desktop strip never shows where the lyrics came from (the lyrics window and Settings do).
+        CreditText.BeginAnimation(OpacityProperty, null);
+        CreditText.Opacity = 0;
     }
 
     public void SetCredit(string? credit)
     {
-        CreditText.Text = credit ?? "";
+        CreditText.Text = "";
         UpdateChrome();
     }
 

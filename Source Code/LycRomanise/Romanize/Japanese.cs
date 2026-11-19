@@ -14,6 +14,7 @@ public static partial class Japanese
     // Lyric words the analyzer may read in a literary way.
     static readonly Dictionary<string, string> Words = new()
     {
+        ["こんにちは"] = "こんにちわ", ["こんばんは"] = "こんばんわ", ["今日は"] = "こんにちわ",
         ["今日"] = "きょう", ["明日"] = "あした", ["昨日"] = "きのう", ["一人"] = "ひとり", ["二人"] = "ふたり",
         ["大人"] = "おとな", ["貴方"] = "あなた", ["運命"] = "うんめい", ["未来"] = "みらい", ["永遠"] = "えいえん",
         ["私"] = "わたし", ["君"] = "きみ", ["僕"] = "ぼく", ["俺"] = "おれ", ["心"] = "こころ", ["夢"] = "ゆめ", ["愛"] = "あい",
@@ -129,7 +130,7 @@ public static partial class Japanese
                 }
                 string reading;
                 bool particle = !w.IsPhraseStart && i > 0;
-                if (particle && display == "は") reading = "wa";
+                if (display == "は" && (particle || (i > 0 && words[i - 1].DisplayText is "こんにち" or "こんばん" or "今日" or "今晩"))) reading = "wa";
                 else if (particle && display == "へ") reading = "e";
                 else if (display == "を") reading = "o";
                 else if (yomi.Any(Chinese.IsHan) || (display.Any(Chinese.IsHan) && yomi == display))
@@ -140,12 +141,17 @@ public static partial class Japanese
                 // Verb and adjective endings (て, る, ない, ます…) run on into the word before;
                 // particles stand apart, as Hepburn writes them.
                 bool hiraganaOnly = display.All(c => c >= 'ぁ' && c <= 'ゟ');
-                if (!w.IsPhraseStart && i > 0 && parts.Count > 0 && hiraganaOnly && !Particles.Contains(display)
+                // A word that opens with small っ (って, っていた) always belongs to the word before: "natte", not "na tte".
+                bool smallTsu = display.Length > 0 && display[0] is 'っ' or 'ッ';
+                if (parts.Count > 0 && i > 0 && smallTsu && !PunctOnly().IsMatch(parts[^1])) parts[^1] += reading;
+                else if (!w.IsPhraseStart && i > 0 && parts.Count > 0 && hiraganaOnly && !Particles.Contains(display)
                     && !PunctOnly().IsMatch(parts[^1]))
                     parts[^1] += reading;
                 else parts.Add(reading);
             }
         }
-        return Regex.Replace(string.Join(' ', parts), " {2,}", " ").Trim();
+        var joined = Regex.Replace(string.Join(' ', parts), " {2,}", " ").Trim();
+        // The analyzer can return nothing for odd mixes (katakana and hiragana in one word): read the kana directly.
+        return joined.Length == 0 && text.Any(IsKana) ? KanaToRomaji(text) : joined;
     }
 }

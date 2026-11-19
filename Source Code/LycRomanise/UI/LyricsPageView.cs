@@ -27,6 +27,9 @@ public sealed class LyricsPageView : FrameworkElement
         public Geometry Geometry = Geometry.Empty;
         public double Height, Width;
         public List<(Rect rect, long start, long end)> Words = new();
+        /// <summary>Each word's own outline, cut from the line once at layout, so a word can lift and glow
+        /// without being clipped by a box (which sliced the tops or bottoms off).</summary>
+        public List<Geometry> WordGeometry = new();
     }
 
     List<Block> _blocks = new();
@@ -43,9 +46,9 @@ public sealed class LyricsPageView : FrameworkElement
     bool _rendering;
     double _dpi = 1;
     string? _empty;
-    readonly Typeface _bold = new(new FontFamily("Segoe UI Variable Display, Segoe UI, Yu Gothic UI, Malgun Gothic, Microsoft YaHei UI"),
+    readonly Typeface _bold = new(new FontFamily("Segoe UI Variable Display, Segoe UI, Yu Gothic UI, Malgun Gothic, Microsoft YaHei UI, Segoe UI Symbol, Segoe UI Emoji"),
         FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
-    readonly Typeface _semi = new(new FontFamily("Segoe UI Variable Display, Segoe UI, Yu Gothic UI, Malgun Gothic, Microsoft YaHei UI"),
+    readonly Typeface _semi = new(new FontFamily("Segoe UI Variable Display, Segoe UI, Yu Gothic UI, Malgun Gothic, Microsoft YaHei UI, Segoe UI Symbol, Segoe UI Emoji"),
         FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
 
     public Action<long>? Seek { get; set; }
@@ -87,6 +90,7 @@ public sealed class LyricsPageView : FrameworkElement
         _layoutWidth = -1;
         _active = -1;
         _userUntil = DateTime.MinValue;
+        _snap = true;
         InvalidateVisual();
     }
 
@@ -98,7 +102,15 @@ public sealed class LyricsPageView : FrameworkElement
         else CompositionTarget.Rendering -= OnFrame;
     }
 
-    void OnFrame(object? sender, EventArgs e) => InvalidateVisual();
+    DateTime _lastInvalidate;
+    // About 40 redraws a second: smooth for scrolling and the karaoke fill, a third less work than 60.
+    void OnFrame(object? sender, EventArgs e)
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastInvalidate).TotalMilliseconds < 24) return;
+        _lastInvalidate = now;
+        InvalidateVisual();
+    }
 
     // ------------------------------------------------------------------ layout
     double Pad => Math.Max(28, ActualWidth * 0.06);
@@ -124,6 +136,18 @@ public sealed class LyricsPageView : FrameworkElement
         {
             var g = ft.BuildHighlightGeometry(new Point(0, 0), ranges[i].from, ranges[i].len);
             if (g != null) t.Words.Add((g.Bounds, line.Words[i].Start, line.Words[i].End));
+        }
+        // Cut each word's glyphs out of the line: across to halfway into the gaps, and the full height of its row.
+        for (int i = 0; i < t.Words.Count; i++)
+        {
+            var r = t.Words[i].rect;
+            bool before = i > 0 && Math.Abs(t.Words[i - 1].rect.Y - r.Y) < 2, after = i + 1 < t.Words.Count && Math.Abs(t.Words[i + 1].rect.Y - r.Y) < 2;
+            double left = before ? (t.Words[i - 1].rect.Right + r.Left) / 2 : r.Left - size;
+            double right = after ? (r.Right + t.Words[i + 1].rect.Left) / 2 : r.Right + size;
+            var band = new RectangleGeometry(new Rect(left, r.Y - size * 0.08, Math.Max(1, right - left), r.Height + size * 0.16));
+            var word = Geometry.Combine(t.Geometry, band, GeometryCombineMode.Intersect, null, 0.25, ToleranceType.Absolute);
+            word.Freeze();
+            t.WordGeometry.Add(word);
         }
         return t;
     }
@@ -233,7 +257,18 @@ public sealed class LyricsPageView : FrameworkElement
     static readonly SolidColorBrush SubDim = Frozen(Color.FromArgb(0x48, 0xFF, 0xFF, 0xFF));
     static SolidColorBrush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
 
+    bool _snap = true;
+    /// <summary>Time spent building frames, for the self-test's performance numbers.</summary>
+    public static double RenderMs; public static int RenderCount;
+
     protected override void OnRender(DrawingContext dc)
+    {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { RenderCore(dc); }
+        finally { RenderMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds; RenderCount++; }
+    }
+
+    void RenderCore(DrawingContext dc)
     {
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
         if (ActualWidth < 50) return;
@@ -258,6 +293,14 @@ public sealed class LyricsPageView : FrameworkElement
         bool user = now < _userUntil;
         double anchor = ActualHeight * 0.32;
         double target = user ? _userScroll : _active >= 0 ? _blocks[_active].Top - anchor : -anchor;
+        if (_snap && ActualHeight > 0)
+        {
+            // First frame for these lyrics: start where the song is, with every line already in place.
+            _scroll = target;
+            foreach (var bl in _blocks) bl.Y = bl.Top - _scroll;
+            _snap = false;
+            dt = 1;   // settle opacity and size at once too
+        }
         _scroll += (target - _scroll) * (1 - Math.Exp(-dt * Motion.scroll));
 
         for (int i = 0; i < _blocks.Count; i++)
@@ -354,41 +397,51 @@ public sealed class LyricsPageView : FrameworkElement
     void DrawLifted(DrawingContext dc, Text text, long t, Brush dim, Brush bright)
     {
         double lift = Motion.lift * _fontSize / 36;
-        Pen? glow = Motion.glow > 0 ? new Pen(new SolidColorBrush(Color.FromArgb((byte)(40 * Motion.glow), 255, 255, 255)), _fontSize * 0.2) { LineJoin = PenLineJoin.Round } : null;
+        var glow = Motion.glow > 0 ? GlowPen(Motion.glow) : null;
         var words = text.Words;
-        for (int i = 0; i < words.Count; i++)
+        for (int i = 0; i < words.Count && i < text.WordGeometry.Count; i++)
         {
             var (rect, start, end) = words[i];
+            var geo = text.WordGeometry[i];
             double f = t <= start ? 0 : t >= end ? 1 : (t - start) / (double)Math.Max(1, end - start);
-            // Words on the same row are cut halfway across the gap; a word that wraps keeps its own box.
-            bool sameRowBefore = i > 0 && Math.Abs(words[i - 1].rect.Y - rect.Y) < 2;
-            bool sameRowAfter = i + 1 < words.Count && Math.Abs(words[i + 1].rect.Y - rect.Y) < 2;
-            double left = sameRowBefore ? (words[i - 1].rect.Right + rect.Left) / 2 : rect.Left - _fontSize;
-            double right = sameRowAfter ? (rect.Right + words[i + 1].rect.Left) / 2 : rect.Right + _fontSize;
-            var box = new Rect(left, rect.Y - _fontSize * 0.4, Math.Max(1, right - left), rect.Height + _fontSize * 0.8);
             double rise = lift * (1 - Math.Pow(1 - f, 3));
-            dc.PushClip(new RectangleGeometry(box));
-            dc.PushTransform(new TranslateTransform(0, -rise));
-            dc.DrawGeometry(dim, null, text.Geometry);
+            bool moved = rise > 0.01;
+            if (moved) dc.PushTransform(new TranslateTransform(0, -rise));
+            if (f < 1) dc.DrawGeometry(dim, null, geo);
             if (f > 0)
             {
-                // The sung part of the word, with a soft leading edge.
-                double edge = Math.Min(14, rect.Width * 0.4);
-                double sx = rect.X + rect.Width * f;
-                var mask = new LinearGradientBrush
+                bool partial = f < 1;
+                if (partial)
                 {
-                    MappingMode = BrushMappingMode.Absolute,
-                    StartPoint = new Point(f >= 1 ? right + 1 : sx - edge, 0), EndPoint = new Point(f >= 1 ? right + 2 : sx + 0.1, 0),
-                    GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
-                };
-                dc.PushOpacityMask(mask);
-                if (glow != null) dc.DrawGeometry(null, glow, text.Geometry);
-                dc.DrawGeometry(bright, null, text.Geometry);
-                dc.Pop();
+                    // The sung part of the word, with a soft leading edge.
+                    double edge = Math.Min(14, rect.Width * 0.4);
+                    double sx = rect.X + rect.Width * f;
+                    var mask = new LinearGradientBrush
+                    {
+                        MappingMode = BrushMappingMode.Absolute,
+                        StartPoint = new Point(sx - edge, 0), EndPoint = new Point(sx + 0.1, 0),
+                        GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
+                    };
+                    dc.PushOpacityMask(mask);
+                }
+                if (glow != null) dc.DrawGeometry(null, glow, geo);
+                dc.DrawGeometry(bright, null, geo);
+                if (partial) dc.Pop();
             }
-            dc.Pop();
-            dc.Pop();
+            if (moved) dc.Pop();
         }
+    }
+
+    Pen? _glowPen; double _glowFor = -1, _glowSize = -1;
+    Pen GlowPen(double strength)
+    {
+        if (_glowPen == null || _glowFor != strength || _glowSize != _fontSize)
+        {
+            var b = new SolidColorBrush(Color.FromArgb((byte)Math.Clamp(40 * strength, 0, 255), 255, 255, 255)); b.Freeze();
+            _glowPen = new Pen(b, _fontSize * 0.2) { LineJoin = PenLineJoin.Round }; _glowPen.Freeze();
+            _glowFor = strength; _glowSize = _fontSize;
+        }
+        return _glowPen;
     }
 
     void DrawDots(DrawingContext dc, double x, double y, Block b, long t)

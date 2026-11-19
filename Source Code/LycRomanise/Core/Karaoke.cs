@@ -159,7 +159,10 @@ public static class Normalize
     public static bool SameArtist(string? credited, string? artist)
     {
         string name = MatchKey(credited), lead = MatchKey(LeadArtist(artist));
-        return name.Length > 0 && lead.Length > 0 && (name.Contains(lead) || lead.Contains(name));
+        if (name.Length == 0 || lead.Length == 0) return false;
+        // Short names ("V", "IU", "I") must match exactly, or "V" would match every artist with a v in it.
+        if (Math.Min(name.Length, lead.Length) < 3) return name == lead;
+        return name.Contains(lead) || lead.Contains(name);
     }
 
     /// <summary>Is a catalog's title the same song as ours? Equal once cleaned, or one is the other plus a

@@ -124,7 +124,7 @@ public sealed class KaraokeView : FrameworkElement
             return Math.Ceiling(c + LineH(SubSize));
         }
         if (Style.Layout == StripStyle.Minimal)
-            return Math.Ceiling(24 + LineH(MainSize) * 2 + LineH(SubSize) + (Style.ShowTranslation ? LineH(TransSize) : 0));
+            return Math.Ceiling(24 + LineH(MainSize) * 2 + LineH(SubSize) * 2 + (Style.ShowTranslation ? LineH(TransSize) : 0));
         double h = 18 + LineH(MainSize) * 2 + LineH(SubSize) * 2;
         if (Style.ShowBacking) h += LineH(BackingSize);
         if (Style.ShowTranslation) h += LineH(TransSize);
@@ -148,9 +148,9 @@ public sealed class KaraokeView : FrameworkElement
 
     /// <summary>Splits a line into rows that fit the width (shrinking the font a little first), and
     /// records where each word sits so the sweep can follow the singing.</summary>
-    RowLayout[] Layout(LyricLine line, double size, double maxWidth)
+    RowLayout[] Layout(LyricLine line, double size, double maxWidth, int maxRows = 2)
     {
-        var key = (line, size, maxWidth);
+        var key = (line, size, maxWidth * 10 + maxRows);
         if (_layoutCache.TryGetValue(key, out var cached)) return cached;
         if (_layoutCache.Count > 64) _layoutCache.Clear();
 
@@ -162,6 +162,12 @@ public sealed class KaraokeView : FrameworkElement
             return sb.ToString();
         }
         double full = Format(Joined(0, words.Count), size).WidthIncludingTrailingWhitespace;
+        // More rows than the strip can show: shrink until it fits in them (down to 55 %), so no words are lost.
+        if (full > maxWidth * maxRows * 0.92)
+        {
+            double k = Math.Max(0.55, maxWidth * maxRows * 0.9 / full);
+            size *= k; full *= k;
+        }
         // Shrink to fit before wrapping, down to 80 %.
         if (full > maxWidth && full * 0.8 <= maxWidth) { size *= maxWidth / full; full = maxWidth; }
         var breaks = new List<(int from, int to)>();
@@ -270,7 +276,7 @@ public sealed class KaraokeView : FrameworkElement
     double DrawSwept(DrawingContext dc, LyricLine line, double size, double y, long t, LineAlign align,
         Color unsung, Color sung, double opacity, bool sweep, int maxRows = 2)
     {
-        var rows = Layout(line, size, ActualWidth - 32);
+        var rows = Layout(line, size, ActualWidth - 32, maxRows);
         double used = 0;
         var pen = Outline(opacity, size / MainSize);
         for (int r = 0; r < rows.Length && r < maxRows; r++)
@@ -377,7 +383,17 @@ public sealed class KaraokeView : FrameworkElement
 
     static double Ease(double x) => 1 - Math.Pow(1 - Math.Clamp(x, 0, 1), 3);
 
+    /// <summary>Time spent building frames, for the self-test's performance numbers.</summary>
+    public static double RenderMs; public static int RenderCount;
+
     protected override void OnRender(DrawingContext dc)
+    {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { RenderCore(dc); }
+        finally { RenderMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds; RenderCount++; }
+    }
+
+    void RenderCore(DrawingContext dc)
     {
         // A hit-testable surface across the whole strip, so it can be dragged anywhere.
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
@@ -390,7 +406,7 @@ public sealed class KaraokeView : FrameworkElement
         }
         long t = _clock?.Invoke() ?? 0;
 
-        // Title card: "Artist — Song" for a few seconds, or until the first line.
+        // Title card: "Artist - Song" for a few seconds, or until the first line.
         bool titleShowing = _titleCard != null && (DateTime.UtcNow - _titleCardAt).TotalSeconds < 7
             && (_lines.Count == 0 || !_synced || t < _lines[0].Start - 300);
         if (_lines.Count == 0)

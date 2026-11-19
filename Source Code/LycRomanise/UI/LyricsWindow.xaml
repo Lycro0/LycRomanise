@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="clr-namespace:LycRomanise.UI"
-        Title="Lyrics — LycRomanise" Width="1180" Height="760" MinWidth="520" MinHeight="420"
+        Title="Lyrics - LycRomanise" Width="1180" Height="760" MinWidth="520" MinHeight="420"
         Background="#0B0B10" Icon="/Assets/lyrics-overlay.ico" ThemeMode="Dark">
     <Grid x:Name="Root" ClipToBounds="True">
         <!-- Blurred, slowly drifting cover behind everything. -->
@@ -39,6 +39,9 @@
                 </LinearGradientBrush>
             </Rectangle.Fill>
         </Rectangle>
+
+        <!-- The plain black background option (instead of the blurred cover). -->
+        <Rectangle x:Name="BlackBg" Fill="#FF050506" Visibility="Collapsed"/>
 
         <Grid Margin="0,0,0,0">
             <Grid.ColumnDefinitions>
@@ -93,13 +96,23 @@
         </Grid>
 
         <!-- Top-right tools -->
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,14,18,0">
+        <StackPanel x:Name="Tools" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,14,18,0">
             <Button Style="{StaticResource OverlayButton}" Click="Smaller_Click" Content="&#xE8E7;" ToolTip="Smaller text"/>
             <Button Style="{StaticResource OverlayButton}" Click="Bigger_Click" Content="&#xE8E8;" ToolTip="Bigger text"/>
             <Button Style="{StaticResource OverlayButton}" Click="Copy_Click" Content="&#xE8C8;" ToolTip="Copy the lyrics"/>
             <Button Style="{StaticResource OverlayButton}" Click="Choose_Click" Content="&#xE8FD;" ToolTip="Choose lyrics for this song"/>
             <Button x:Name="PinBtn" Style="{StaticResource OverlayButton}" Click="Pin_Click" Content="&#xE718;" ToolTip="Keep on top"/>
             <Button Style="{StaticResource OverlayButton}" Click="Panel_Click" Content="&#xE89F;" ToolTip="Show or hide the player"/>
+            <Button x:Name="GearBtn" Style="{StaticResource OverlayButton}" Click="Gear_Click" Content="&#xE713;" ToolTip="Settings for this window (S)"/>
         </StackPanel>
+
+        <!-- Settings panel, slides in from the right. -->
+        <Border x:Name="SettingsPanel" HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="340" Margin="0,58,16,16"
+                CornerRadius="14" Background="#F00C0C0E" BorderBrush="#22FFFFFF" BorderThickness="1" Visibility="Collapsed">
+            <Border.RenderTransform><TranslateTransform x:Name="PanelSlide" X="0"/></Border.RenderTransform>
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="18,14,18,16">
+                <StackPanel x:Name="PanelBody"/>
+            </ScrollViewer>
+        </Border>
     </Grid>
 </Window>

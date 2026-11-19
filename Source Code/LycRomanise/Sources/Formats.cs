@@ -31,6 +31,7 @@ public static partial class Formats
     public static List<LyricLine>? ParseLrc(string? lrc)
     {
         if (string.IsNullOrWhiteSpace(lrc)) return null;
+        lrc = lrc.TrimStart((char)0xFEFF);   // a byte order mark would hide the first line's stamp
         long offset = 0;
         var om = LrcOffset().Match(lrc);
         if (om.Success) offset = long.Parse(om.Groups[1].Value);

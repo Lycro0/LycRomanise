@@ -23,6 +23,14 @@ public static class Chinese
         ['仿'] = "fang3", ['佛'] = "fu2", ['恶'] = "e4", ['冲'] = "chong1", ['处'] = "chu4", ['似'] = "si4", ['降'] = "jiang4",
         ['正'] = "zheng4", ['结'] = "jie2", ['睡'] = "shui4", ['熟'] = "shu2", ['血'] = "xue4", ['薄'] = "bo2", ['露'] = "lu4",
         ['裳'] = "shang5", ['着'] = "zhe5", ['弄'] = "nong4", ['识'] = "shi2", ['恐'] = "kong3", ['于'] = "yu2", ['与'] = "yu3",
+        ['许'] = "xu3", ['几'] = "ji3", ['晃'] = "huang4", ['给'] = "gei3", ['只'] = "zhi3", ['得'] = "de5",
+        // Traditional forms of the above (Taiwanese and Hong Kong lyrics).
+        ['許'] = "xu3", ['幾'] = "ji3", ['們'] = "men5", ['個'] = "ge4", ['還'] = "hai2", ['長'] = "chang2", ['為'] = "wei4",
+        ['覺'] = "jue2", ['沒'] = "mei2", ['說'] = "shuo1", ['會'] = "hui4", ['嗎'] = "ma5", ['樂'] = "le4", ['發'] = "fa1",
+        ['傳'] = "chuan2", ['彈'] = "tan2", ['數'] = "shu4", ['間'] = "jian1", ['種'] = "zhong3", ['將'] = "jiang1", ['給'] = "gei3",
+        ['當'] = "dang1", ['應'] = "ying1", ['轉'] = "zhuan3", ['盡'] = "jin4", ['處'] = "chu4", ['結'] = "jie2", ['識'] = "shi2",
+        ['與'] = "yu3", ['麼'] = "me5", ['著'] = "zhe5", ['裡'] = "li3", ['裏'] = "li3", ['里'] = "li3", ['誰'] = "shei2", ['谁'] = "shei2",
+        ['這'] = "zhe4", ['这'] = "zhe4", ['那'] = "na4", ['卻'] = "que4", ['却'] = "que4", ['勁'] = "jin4", ['載'] = "zai4",
     };
 
     static readonly Dictionary<char, string> Punct = new()
@@ -78,7 +86,7 @@ public static class Chinese
         text = text.Normalize(NormalizationForm.FormKC);
         var readings = new List<string?>();
         foreach (var c in text) readings.Add(IsHan(c) ? Numbered(c) : null);
-        // Tone changes: 不 before a 4th tone is bú; 一 before a 4th tone is yí, before 1–3 yì.
+        // Tone changes: 不 before a 4th tone is bú; 一 before a 4th tone is yí, before tones 1 to 3 yì.
         for (int i = 0; i < text.Length; i++)
         {
             if (readings[i] == null) continue;

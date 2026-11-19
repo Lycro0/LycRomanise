@@ -19,7 +19,7 @@ public sealed class LyricLine
     public List<LyricWord> Words { get; set; } = new();
     public long Start { get; set; }
     public long End { get; set; }
-    /// <summary>TTML agent ("v1", "v2") — a second voice in a duet.</summary>
+    /// <summary>TTML agent ("v1", "v2"): a second voice in a duet.</summary>
     public string? Voice { get; set; }
     public LineAlign Align { get; set; } = LineAlign.Leading;
     /// <summary>Backing vocals sung under the line.</summary>
