@@ -8,16 +8,16 @@
 </p>
 <p align="center">
   <a href="https://github.com/Lycro0/LycRomanise/releases/latest"><b>Download for Windows</b></a> ·
-  <a href="Source%20Code/assets/LycRomanise-Trailer.mp4">Watch the trailer</a> ·
+  <a href="https://youtu.be/kiYvWNL_SuU">Watch the trailer on YouTube</a> ·
   <a href="Source%20Code/DETAILS.md">Full details</a>
 </p>
 
 <p align="center">
-  <a href="Source%20Code/assets/LycRomanise-Trailer.mp4">
+  <a href="https://youtu.be/kiYvWNL_SuU">
     <img src="Source%20Code/assets/LycRomanise-Preview.gif" alt="LycRomanise trailer: the lyrics strip, nine looks, the full lyrics window, the web view and OBS" width="100%">
   </a>
   <br>
-  <sub>Click the preview to watch the full trailer with sound.</sub>
+  <sub>Click the preview to watch the full trailer on YouTube.</sub>
 </p>
 
 > Version 2 is a rewrite in C# and .NET 10; version 1 was written in Python. It starts faster, draws on the GPU and does nothing while the music is paused. Your v1 colours and strip settings are copied over the first time it starts.
