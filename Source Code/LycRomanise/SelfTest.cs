@@ -60,7 +60,7 @@ static class SelfTest
             ("こんにちは", "konnichiwa"), ("ありがとう", "arigatou"), ("東京", "toukyou"), ("きって", "kitte"),
             ("ラーメン", "raamen"), ("私は学生です", "watashiwagakuseidesu"), ("夢を見た", "yumeomita"), ("気づいたら大人になっていた", "kizuitaraotonaninatteita"),
             ("しゃしん", "shashin"), ("ちょっと", "chotto"), ("コンピューター", "konpyuutaa"), ("ヴァイオリン", "vaiorin"),
-            ("君の名は", "kiminonawa"), ("会いたい", "aitai"), ("空へ", "sorae"),
+            ("君の名は", "kiminonawa"), ("空に広がる天使（てんし）の声", "soranihirogarutenshinokoe"), ("空に広がる天使の声", "soranihirogarutenshinokoe"), ("会いたい", "aitai"), ("空へ", "sorae"),
             // Chinese
             ("也許", "yěxǔ"), ("幾分", "jǐfēn"), ("晃到", "huàngdào"), ("我們", "wǒmen"), ("你好", "nǐhǎo"), ("我爱你", "wǒàinǐ"), ("月光", "yuèguāng"), ("中国", "zhōngguó"), ("重要", "zhòngyào"),
             // Others
@@ -80,6 +80,26 @@ static class SelfTest
             var line = new LyricLine { Start = 0, End = 4000, Words = { W("말", 0, 500), W("해", 500, 1000, true), W("줄", 1000, 1500, true), W("래", 1500, 2000, true), W("멀", 2000, 3000), W("리", 3000, 4000, true) } };
             var r = Romanizer.ForLine(line, "ko");
             Check("syllable-timed Korean keeps sound changes", r?.Text == "malhaejullae meolli", r?.Text ?? "null");
+        });
+
+        Section("Romanization on a background thread (as the app does it)");
+        foreach (var t in new[] { "空に広がる天使の声", "悲しまない明日を願うけど", "夢を見た", "気づいたら大人になっていた" })
+            Safe($"background {t}", () =>
+            {
+                var got = Task.Run(() => Romanizer.Line(t + " ", "ja")).Result;   // the space avoids the cache
+                Check($"background {t}", !Romanizer.Needs(got), got);
+            });
+
+        Safe("furigana pieces removed", () =>
+        {
+            var chars = "空に広がる天使（てんし）の声";
+            var line = new LyricLine { Start = 0, End = chars.Length * 100 };
+            for (int i = 0; i < chars.Length; i++) line.Words.Add(W(chars[i].ToString(), i * 100, i * 100 + 100, i > 0));
+            SourceUtil.DropFurigana(line);
+            Check("furigana pieces removed from a char-timed line", line.Text == "空に広がる天使の声", line.Text);
+            var one = new LyricLine { Start = 0, End = 1000, Words = { W("天使(てんし)の", 0, 500), W("声", 500, 1000) } };
+            SourceUtil.DropFurigana(one);
+            Check("furigana inside a word removed", one.Text == "天使の 声", one.Text);
         });
 
         Section("Romanization: robustness");

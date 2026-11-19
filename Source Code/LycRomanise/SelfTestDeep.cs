@@ -103,7 +103,8 @@ static class SelfTestDeep
             var text = sb.ToString();
             Try($"ja {text}", () =>
             {
-                var r = Romanizer.Line(text, "ja");
+                // Half the cases on a thread-pool thread, as the app prepares lyrics in the background.
+                var r = i % 2 == 0 ? Romanizer.Line(text, "ja") : Task.Run(() => Romanizer.Line(text, "ja")).Result;
                 bool ok = Latinish(r) && r.Length > 0 && r.Length <= text.Length * 8 + 6 && (!text.Contains("love") || r.Contains("love"));
                 Check($"ja {text}", ok, $"\"{r}\"");
             });

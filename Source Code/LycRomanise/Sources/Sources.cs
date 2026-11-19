@@ -21,10 +21,32 @@ static partial class SourceUtil
     [GeneratedRegex(@"^\s*(作?词|作?曲|词曲|編曲|编曲|作詞|制作人|製作人|制作|監製|监制|混音|母带|和声|和音|吉他|贝斯|鼓|弦乐|录音|錄音|出品|发行|發行|统筹|企划|OP|SP|ISRC|Lyrics?(\s+by)?|Lyricist|Composed\s+by|Composer|Music(\s+by)?|Produced\s+by|Producer|Written\s+by|Arranged\s+by|Arranger|Mixed\s+by|Mastered\s+by|Vocals?\s+by)\s*[:：]", RegexOptions.IgnoreCase)]
     private static partial Regex CreditLine();
 
+    /// <summary>Removes readings written into the lyric after kanji, "天使（てんし）", whether the source split
+    /// them into their own timed pieces (KuGou does, one character each) or kept them inside a word.</summary>
+    public static void DropFurigana(LyricLine line)
+    {
+        var w = line.Words;
+        static bool Kanji(char c) => Romanize.Chinese.IsHan(c) || c is '々' or '〆' or 'ヶ';
+        static bool Kana(string t) => t.Length > 0 && t.All(c => Romanize.Japanese.IsKana(c) || c == 'ー');
+        for (int i = 1; i < w.Count; i++)
+        {
+            if (w[i].Text is not ("（" or "(") || w[i - 1].Text.Length == 0 || !Kanji(w[i - 1].Text[^1])) continue;
+            int j = i + 1;
+            while (j < w.Count && Kana(w[j].Text)) j++;
+            if (j >= w.Count || j == i + 1 || w[j].Text is not ("）" or ")")) continue;
+            w[i - 1].End = w[j].End;                  // the kanji keep the reading's time
+            if (j + 1 < w.Count && !w[j + 1].Joined) { } // spacing after stays as it was
+            w.RemoveRange(i, j - i + 1);
+        }
+        foreach (var x in w) x.Text = Romanize.Japanese.StripFurigana(x.Text);
+        w.RemoveAll(x => x.Text.Length == 0);
+    }
+
     public static LyricsResult? Result(string key, string provider, List<LyricLine>? lines, Timing? timing = null)
     {
         if (lines == null || lines.Count == 0) return null;
         lines = lines.Where((l, i) => !(i < 16 && CreditLine().IsMatch(l.Text))).ToList();
+        foreach (var l in lines) DropFurigana(l);
         if (lines.Count == 0) return null;
         return new LyricsResult { SourceKey = key, Provider = provider, Lines = lines, Timing = timing ?? Karaoke.TimingOf(lines) };
     }

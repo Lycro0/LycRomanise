@@ -104,16 +104,54 @@ public static partial class Japanese
         ['（'] = "(", ['）'] = ")", ['…'] = "...", ['～'] = "~", ['〜'] = "~", ['・'] = " ", ['♪'] = "♪",
     };
 
+    static bool _warned;
+
+    // Windows' Japanese reader only works on a single-threaded (STA) thread; called from the thread pool it
+    // fails, and the kanji were left as they were ("夢o見ta"). Calls from other threads are run on one
+    // dedicated STA thread instead.
+    static readonly System.Collections.Concurrent.BlockingCollection<(string text, TaskCompletionSource<IReadOnlyList<JapanesePhoneme>?> done)> _work = new();
+    static Thread? _sta;
+
+    static IReadOnlyList<JapanesePhoneme>? Analyze(string chunk)
+    {
+        if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA) return JapanesePhoneticAnalyzer.GetWords(chunk);
+        lock (_work)
+        {
+            if (_sta == null)
+            {
+                _sta = new Thread(() =>
+                {
+                    foreach (var (text, done) in _work.GetConsumingEnumerable())
+                    {
+                        try { done.SetResult(JapanesePhoneticAnalyzer.GetWords(text)); }
+                        catch (Exception ex) { done.SetException(ex); }
+                    }
+                }) { IsBackground = true, Name = "japanese reader" };
+                _sta.SetApartmentState(ApartmentState.STA);
+                _sta.Start();
+            }
+        }
+        var tcs = new TaskCompletionSource<IReadOnlyList<JapanesePhoneme>?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _work.Add((chunk, tcs));
+        return tcs.Task.GetAwaiter().GetResult();
+    }
+
+    // Furigana written into the lyric itself, "天使（てんし）" or "天使(てんし)": the reading in brackets after kanji.
+    [GeneratedRegex(@"(?<=[\p{IsCJKUnifiedIdeographs}々〆ヶ])[（(][\p{IsHiragana}\p{IsKatakana}ー]+[）)]")]
+    private static partial Regex Furigana();
+    public static string StripFurigana(string text) => Furigana().Replace(text, "");
+
     public static string Romanize(string text)
     {
-        text = text.Normalize(NormalizationForm.FormKC);
+        text = StripFurigana(text.Normalize(NormalizationForm.FormKC));
         var parts = new List<string>();
         // The analyzer reads at most 100 characters at a time.
         for (int start = 0; start < text.Length; start += 100)
         {
             var chunk = text.Substring(start, Math.Min(100, text.Length - start));
             IReadOnlyList<JapanesePhoneme>? words = null;
-            try { words = JapanesePhoneticAnalyzer.GetWords(chunk); } catch { }
+            try { words = Analyze(chunk); }
+            catch (Exception ex) { if (!_warned) { _warned = true; LycRomanise.Core.Log.Error("japanese reader", ex); } }
             if (words == null) { parts.Add(KanaToRomaji(chunk)); continue; }
             for (int i = 0; i < words.Count; i++)
             {

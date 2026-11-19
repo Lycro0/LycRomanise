@@ -381,6 +381,8 @@ public sealed class AppController : IDisposable
     /// <summary>Romanizes the lines and sets out what each one shows, by the display mode.</summary>
     internal static List<DisplayLine> Prepare(LyricsResult r, AppSettings s)
     {
+        // Readings written into the lyric ("天使（てんし）") also come from the cache and from imported files.
+        foreach (var l in r.Lines) SourceUtil.DropFurigana(l);
         var script = Romanizer.SongScript(r.Lines);
         var list = new List<DisplayLine>(r.Lines.Count);
         foreach (var line in r.Lines)
