@@ -104,9 +104,42 @@ public partial class SettingsWindow : Window
 
     void Commit()
     {
-        _app.ApplySettings(_s.Copy(), _pendingLyrics);
+        _app.ApplySettings(_s.Copy(), _pendingLyrics, fromSettingsWindow: true);
         _pendingLyrics = false;
         SavedText.Text = "Saved · " + DateTime.Now.ToString("HH:mm:ss");
+    }
+
+    /// <summary>Settings changed elsewhere (tray, hotkey): take them, saving any edit still waiting first.</summary>
+    public void Resync()
+    {
+        if (_debounce.IsEnabled) { _debounce.Stop(); var mine = _s; _s = _app.Settings.Copy(); MergePending(mine); Commit(); }
+        else _s = _app.Settings.Copy();
+        double y = Scroller.VerticalOffset;
+        Show(_page);
+        Scroller.ScrollToVerticalOffset(y);
+    }
+
+    // Keep the outside change to these switches; everything else comes from the pending edit.
+    void MergePending(AppSettings mine)
+    {
+        bool hide = _s.HideDesktopStrip, web = _s.WebEnabled;
+        _s = mine;
+        _s.HideDesktopStrip = hide;
+        _s.WebEnabled = web;
+    }
+
+    static System.Windows.Media.Imaging.BitmapImage QrImage(string text)
+    {
+        using var gen = new QRCoder.QRCodeGenerator();
+        using var data = gen.CreateQrCode(text, QRCoder.QRCodeGenerator.ECCLevel.M);
+        var png = new QRCoder.PngByteQRCode(data).GetGraphic(8);
+        var img = new System.Windows.Media.Imaging.BitmapImage();
+        img.BeginInit();
+        img.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+        img.StreamSource = new MemoryStream(png);
+        img.EndInit();
+        img.Freeze();
+        return img;
     }
 
     protected override void OnClosed(EventArgs e)
@@ -622,6 +655,16 @@ public partial class SettingsWindow : Window
             Orientation = Orientation.Horizontal,
             Children = { Btn("Copy", () => Clipboard.SetText(url)), Btn("Open", () => Open(url)) },
         }, ""));
+        var qr = new Border
+        {
+            Background = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(8),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Child = new Image { Source = QrImage(url), Width = 160, Height = 160, SnapsToDevicePixels = true },
+        };
+        RenderOptions.SetBitmapScalingMode(qr.Child, BitmapScalingMode.NearestNeighbor);
+        p.Children.Add(Card("Scan with your phone", _s.WebEnabled
+            ? "Point your phone's camera at the code. It has to be on the same Wi-Fi."
+            : "Turn on the web view first, then scan the code.", qr, ""));
         var obs = url + "obs";
         p.Children.Add(Card("Link for OBS (transparent)", obs, Btn("Copy", () => Clipboard.SetText(obs)), ""));
         p.Children.Add(Card("Hide lyrics on this PC", "Only the web view shows them.", Toggle(_s.HideDesktopStrip, v => _s.HideDesktopStrip = v), ""));

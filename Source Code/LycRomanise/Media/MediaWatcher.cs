@@ -37,7 +37,7 @@ public sealed class MediaWatcher : IDisposable
     GlobalSystemMediaTransportControlsSession? _session;
     long _lastReportedPos = -1;
     DateTime _lastTimelineAt;
-    int _busy;
+    int _busy, _failures;
 
     public event Action<MediaState?>? Changed;
     public MediaState? Current => _last;
@@ -77,9 +77,15 @@ public sealed class MediaWatcher : IDisposable
                 || state?.AppId != _last?.AppId
                 || (state != null && _last != null && Math.Abs(state.PositionNow() - _last.PositionNow()) > 1200);
             _last = state;
+            _failures = 0;
             if (changed) Changed?.Invoke(state);
         }
-        catch (Exception ex) { Log.Error("media poll", ex); }
+        catch (Exception ex)
+        {
+            Log.Error("media poll", ex);
+            // A player that keeps failing (closing, hung) is treated as stopped, so the strip doesn't stay up.
+            if (++_failures == 3 && _last != null) { _last = null; Changed?.Invoke(null); }
+        }
         finally { Interlocked.Exchange(ref _busy, 0); }
     }
 

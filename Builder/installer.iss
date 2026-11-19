@@ -3,7 +3,7 @@
 ; The AppId is the same as v1.x, so installing v2 upgrades an existing install in place.
 #define AppName "LycRomanise"
 #ifndef AppVersion
-  #define AppVersion "2.1.0"
+  #define AppVersion "2.1.1"
 #endif
 
 [Setup]

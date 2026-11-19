@@ -424,17 +424,19 @@ public sealed class AppController : IDisposable
     {
         var m = Media.Current;
         bool playing = m is { Playing: true };
-        bool show = !Settings.HideDesktopStrip && (playing || !Settings.HideWhenPaused || _settingsWindow != null);
+        // While Settings is open and on screen the strip stays up as a preview; minimized or closed, pausing hides it.
+        bool previewing = _settingsWindow is { IsVisible: true } w && w.WindowState != WindowState.Minimized && w.IsActive;
+        bool show = !Settings.HideDesktopStrip && (playing || !Settings.HideWhenPaused || previewing);
         if (show && !Overlay.IsVisible) Overlay.Show();
         Overlay.BeginAnimation(UIElement.OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(show ? 1 : 0, TimeSpan.FromMilliseconds(250)));
         if (!show) Overlay.IsHitTestVisible = false; else Overlay.IsHitTestVisible = true;
-        Overlay.Karaoke.SetAnimating(show && (playing || _settingsWindow != null));
+        Overlay.Karaoke.SetAnimating(show && (playing || previewing));
     }
 
     // ------------------------------------------------------------------ settings
     public void SaveSettings() => Settings.Save();
 
-    public void ApplySettings(AppSettings updated, bool lyricsAffected)
+    public void ApplySettings(AppSettings updated, bool lyricsAffected, bool fromSettingsWindow = false)
     {
         bool webChanged = updated.WebEnabled != Settings.WebEnabled || updated.WebPort != Settings.WebPort;
         bool sourcesChanged = string.Join(",", updated.Sources.Select(e => e.Key + e.Enabled)) != string.Join(",", Settings.Sources.Select(e => e.Key + e.Enabled))
@@ -471,6 +473,8 @@ public sealed class AppController : IDisposable
         else if (lyricsAffected) Reprepare();
         UpdateVisibility();
         Tray?.Refresh();
+        // A change from the tray or a hotkey: the open Settings window must not save its older copy over it.
+        if (!fromSettingsWindow) _settingsWindow?.Resync();
     }
 
     public void SetLocked(bool locked)
@@ -488,6 +492,9 @@ public sealed class AppController : IDisposable
         {
             _settingsWindow = new SettingsWindow(this);
             _settingsWindow.Closed += (_, _) => { _settingsWindow = null; UpdateVisibility(); };
+            _settingsWindow.Activated += (_, _) => UpdateVisibility();
+            _settingsWindow.Deactivated += (_, _) => UpdateVisibility();
+            _settingsWindow.StateChanged += (_, _) => UpdateVisibility();
             _settingsWindow.Show();
             OverlayWindow.ShowWindow(new System.Windows.Interop.WindowInteropHelper(_settingsWindow).Handle, 9 /* SW_RESTORE */);
             UpdateVisibility();
