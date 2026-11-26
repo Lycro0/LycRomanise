@@ -10,7 +10,6 @@ using LycRomanise.Sources;
 
 namespace LycRomanise.UI;
 
-/// <summary>Settings, laid out as a sidebar of pages of cards. Every change applies at once.</summary>
 public partial class SettingsWindow : Window
 {
     readonly AppController _app;
@@ -27,6 +26,7 @@ public partial class SettingsWindow : Window
     {
         _app = app;
         _s = app.Settings.Copy();
+        _base = app.Settings.Copy();
         InitializeComponent();
         Theme.Paint(this);
         VersionText.Text = "v" + typeof(App).Assembly.GetName().Version?.ToString(3);
@@ -67,7 +67,6 @@ public partial class SettingsWindow : Window
     void LyricsBar_Click(object sender, RoutedEventArgs e) => _app.ShowLyricsWindow();
     void UpdateBar_Click(object sender, System.Windows.Input.MouseButtonEventArgs e) => Show("about");
 
-    // ------------------------------------------------------------------ plumbing
     void AddPage(string key, string title, string glyph, Func<UIElement> build)
     {
         _pages[key] = build;
@@ -88,46 +87,61 @@ public partial class SettingsWindow : Window
         Nav.Children.Add(rb);
     }
 
-    void Show(string key)
+    // Pages are built once and kept; rebuild only when a change elsewhere makes the shown values stale.
+    readonly Dictionary<string, UIElement> _built = new();
+
+    void Show(string key, bool rebuild = false)
     {
+        bool same = key == _page && PageHost.Content != null;
         _page = key;
         foreach (RadioButton rb in Nav.Children) rb.IsChecked = (string)rb.Tag == key;
-        _songTitle = _songInfo = _songOffset = null;
-        PageHost.Content = _pages[key]();
-        Scroller.ScrollToTop();
+        if (rebuild || !_built.TryGetValue(key, out var page)) _built[key] = page = _pages[key]();
+        double y = Scroller.VerticalOffset;
+        PageHost.Content = page;
+        if (same) Scroller.ScrollToVerticalOffset(y); else Scroller.ScrollToTop();
     }
 
     void Changed(bool lyricsAffected = false)
     {
         _pendingLyrics |= lyricsAffected;
-        _debounce.Stop();
-        _debounce.Start();
+        // A throttle, not a restarting debounce: while a slider is dragged the strip still follows every 120 ms.
+        if (!_debounce.IsEnabled) _debounce.Start();
     }
+
+    // Settings as this window last took or saved them: tells its own edits apart from changes made elsewhere.
+    AppSettings _base;
+    AppSettings? _beforePreset;
 
     void Commit()
     {
         _app.ApplySettings(_s.Copy(), _pendingLyrics, fromSettingsWindow: true);
+        _base = _app.Settings.Copy();
         _pendingLyrics = false;
+        // Other pages may show the setting just changed (Display is on two pages): build them fresh next time.
+        foreach (var key in _built.Keys.Where(k => k != _page).ToList()) _built.Remove(key);
         SavedText.Text = "Saved · " + DateTime.Now.ToString("HH:mm:ss");
     }
 
-    /// <summary>Settings changed elsewhere (tray, hotkey): take them, saving any edit still waiting first.</summary>
+    // Settings changed elsewhere (tray, hotkey): take them, saving any edit still waiting first.
     public void Resync()
     {
         if (_debounce.IsEnabled) { _debounce.Stop(); var mine = _s; _s = _app.Settings.Copy(); MergePending(mine); Commit(); }
-        else _s = _app.Settings.Copy();
-        double y = Scroller.VerticalOffset;
-        Show(_page);
-        Scroller.ScrollToVerticalOffset(y);
+        else { _s = _app.Settings.Copy(); _base = _app.Settings.Copy(); }
+        _built.Clear();
+        Show(_page, rebuild: true);
     }
 
-    // Keep the outside change to these switches; everything else comes from the pending edit.
+    static readonly System.Text.Json.JsonSerializerOptions MergeJson = new() { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+
+    // Three-way merge: settings changed here since _base come from the pending edit, the rest from outside (_s).
     void MergePending(AppSettings mine)
     {
-        bool hide = _s.HideDesktopStrip, web = _s.WebEnabled;
-        _s = mine;
-        _s.HideDesktopStrip = hide;
-        _s.WebEnabled = web;
+        var baseNode = System.Text.Json.JsonSerializer.SerializeToNode(_base, MergeJson)!.AsObject();
+        var mineNode = System.Text.Json.JsonSerializer.SerializeToNode(mine, MergeJson)!.AsObject();
+        var fresh = System.Text.Json.JsonSerializer.SerializeToNode(_s, MergeJson)!.AsObject();
+        foreach (var (name, value) in mineNode.ToList())
+            if (!System.Text.Json.Nodes.JsonNode.DeepEquals(value, baseNode[name])) fresh[name] = value?.DeepClone();
+        _s = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(fresh.ToJsonString(), MergeJson)!.Copy();
     }
 
     static System.Windows.Media.Imaging.BitmapImage QrImage(string text)
@@ -146,11 +160,13 @@ public partial class SettingsWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        // Closing does not move logical focus, so a box that saves on LostFocus (port, client id, typed font)
+        // would lose its text: clear focus first, which raises LostFocus and queues the save.
+        if (System.Windows.Input.FocusManager.GetFocusedElement(this) != null) System.Windows.Input.FocusManager.SetFocusedElement(this, null);
         if (_debounce.IsEnabled) { _debounce.Stop(); Commit(); }
         base.OnClosed(e);
     }
 
-    // ------------------------------------------------------------------ building blocks
     static StackPanel PageRoot(string title, string? subtitle = null)
     {
         var sp = new StackPanel();
@@ -190,7 +206,6 @@ public partial class SettingsWindow : Window
 
     CheckBox Toggle(bool value, Action<bool> set, bool lyrics = false)
     {
-        // A Fluent toggle switch look: WPF's Fluent theme styles a ToggleButton-like CheckBox; keep it simple.
         var cb = new CheckBox { IsChecked = value, Content = value ? "On" : "Off", MinWidth = 70 };
         cb.Checked += (_, _) => { cb.Content = "On"; set(true); Changed(lyrics); };
         cb.Unchecked += (_, _) => { cb.Content = "Off"; set(false); Changed(lyrics); };
@@ -214,6 +229,8 @@ public partial class SettingsWindow : Window
         return cb;
     }
 
+    static readonly Lazy<string[]> FontNames = new(() => Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(x => x).ToArray());
+
     static readonly string[] Palette =
     {
         "#FFE14D", "#FF3D9A", "#FFFFFF", "#000000", "#7CF5FF", "#5B8CFF", "#A66BFF", "#FF6B6B", "#FF9F43", "#2ED573",
@@ -226,14 +243,25 @@ public partial class SettingsWindow : Window
         var hex = new TextBox { Text = value, Width = 96, Margin = new Thickness(10, 0, 0, 0), VerticalContentAlignment = VerticalAlignment.Center };
         var popup = new Popup { PlacementTarget = swatch, Placement = PlacementMode.Bottom, StaysOpen = false, AllowsTransparency = true };
         var grid = new UniformGrid { Columns = 10, Margin = new Thickness(10) };
+        string current = value.ToUpperInvariant();
         void Apply(string h)
         {
+            h = h.Trim();
+            if (h.Length == 0) return;
+            if (!h.StartsWith('#')) h = "#" + h;
             var c = Theme.ParseColor(h, Colors.Transparent);
             if (c == Colors.Transparent && h != "#00000000") return;
+            if (h.Length is not (4 or 7 or 9)) return;
             swatch.Background = new SolidColorBrush(c);
-            set(h.ToUpperInvariant());
+            h = h.ToUpperInvariant();
+            if (h == current) return;
+            current = h;
+            set(h);
             Changed();
         }
+        popup.Opened += (_, _) => { if (grid.Children.Count == 0) FillSwatches(); };
+        void FillSwatches()
+        {
         foreach (var p in Palette)
         {
             var b = new Button { Width = 24, Height = 24, Margin = new Thickness(3), Padding = new Thickness(0), Background = new SolidColorBrush(Theme.ParseColor(p, Colors.White)), ToolTip = p, MinWidth = 0, MinHeight = 0 };
@@ -241,16 +269,16 @@ public partial class SettingsWindow : Window
             b.Click += (_, _) => { hex.Text = p; Apply(p); popup.IsOpen = false; };
             grid.Children.Add(b);
         }
-        popup.Child = new Border
-        {
-            Background = (Brush)FindResource("SolidBackgroundFillColorBaseBrush"),
-            BorderBrush = (Brush)FindResource("CardStrokeColorDefaultBrush"), BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8), Child = grid,
-        };
+        }
+        var popBorder = new Border { BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Child = grid };
+        // References, not copies, so a theme change on this page repaints them.
+        popBorder.SetResourceReference(Border.BackgroundProperty, "SolidBackgroundFillColorBaseBrush");
+        popBorder.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
+        popup.Child = popBorder;
         swatch.MouseLeftButtonUp += (_, _) => popup.IsOpen = true;
         swatch.Cursor = System.Windows.Input.Cursors.Hand;
-        hex.LostFocus += (_, _) => Apply(hex.Text.Trim().StartsWith('#') ? hex.Text.Trim() : "#" + hex.Text.Trim());
-        hex.KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Enter) Apply(hex.Text.Trim()); };
+        hex.TextChanged += (_, _) => { if (hex.IsLoaded) Apply(hex.Text); };
+        hex.KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Enter) Apply(hex.Text); };
         return new StackPanel { Orientation = Orientation.Horizontal, Children = { swatch, hex, popup } };
     }
 
@@ -284,14 +312,12 @@ public partial class SettingsWindow : Window
         try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); } catch (Exception ex) { Log.Error("open " + target, ex); }
     }
 
-    // ------------------------------------------------------------------ pages
     UIElement NowPlayingPage()
     {
         var p = PageRoot("Now playing");
         var hero = new Border
         {
             CornerRadius = new CornerRadius(12), Padding = new Thickness(24, 20, 24, 20), Margin = new Thickness(0, 0, 0, 8),
-            // Brand: black into deep red, a thin white edge.
             Background = new LinearGradientBrush(Color.FromRgb(0x0E, 0x0E, 0x10), Color.FromRgb(0x6E, 0x0B, 0x18), 20),
             BorderBrush = new SolidColorBrush(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF)), BorderThickness = new Thickness(1),
         };
@@ -355,7 +381,7 @@ public partial class SettingsWindow : Window
             File.Copy(dlg.FileName, dest, true);
             var r = _app.Chain.Imported.Load(dest);
             if (r == null) { MessageBox.Show(this, "That file has no lyrics LycRomanise can read.", "LycRomanise"); return; }
-            _app.UseResult(r, rememberForSong: true);
+            _app.UseResult(q, r, rememberForSong: true);   // not applied if the song changed meanwhile
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Could not import"); }
     }
@@ -365,12 +391,29 @@ public partial class SettingsWindow : Window
         var p = PageRoot("Appearance", "Pick a look, then fine-tune its colours, font and effects.");
         p.Children.Add(Group("Looks"));
         var gallery = new WrapPanel { Margin = new Thickness(-4, 0, 0, 0) };
+        // Which card is chosen comes from the values, not the stored name: edits after picking one make it Custom.
+        var matching = LookPresets.Matching(_s);
+        if (matching == null)
+            p.Children.Add(new TextBlock { Text = "Your look is custom. Picking a look below replaces its colours, font and effects; you can undo that here.",
+                Style = (Style)Application.Current.FindResource("CardHint"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) });
+        if (_beforePreset != null && !LookPresets.SameLook(_beforePreset, _s))
+        {
+            var undo = Btn("Put my own look back", () =>
+            {
+                LookPresets.CopyLook(_beforePreset!, _s);
+                _beforePreset = null;
+                Changed(lyricsAffected: true);
+                Show("look", rebuild: true);
+            });
+            undo.HorizontalAlignment = HorizontalAlignment.Left;
+            undo.Margin = new Thickness(0, 0, 0, 8);
+            p.Children.Add(undo);
+        }
         foreach (var preset in LookPresets.All)
         {
-            // Each card previews the look: its words in its own colours, half sung.
             var trial = _s.Copy();
             preset.Apply(trial);
-            bool chosen = _s.LookPreset == preset.Name;
+            bool chosen = ReferenceEquals(matching, preset);
             var sample = new TextBlock { FontSize = 17, FontWeight = trial.Bold ? FontWeights.Bold : FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0) };
             sample.Inlines.Add(new System.Windows.Documents.Run("Sing ") { Foreground = new SolidColorBrush(Theme.ParseColor(trial.SungColor, Colors.White)) });
             sample.Inlines.Add(new System.Windows.Documents.Run("along") { Foreground = new SolidColorBrush(Theme.ParseColor(trial.UnsungColor, Colors.White)) });
@@ -390,14 +433,16 @@ public partial class SettingsWindow : Window
             {
                 Content = body, Margin = new Thickness(4), Padding = new Thickness(12), HorizontalContentAlignment = HorizontalAlignment.Left,
                 BorderThickness = new Thickness(chosen ? 2 : 1),
-                BorderBrush = chosen ? (Brush)FindResource("AccentFillColorDefaultBrush") : (Brush)FindResource("CardStrokeColorDefaultBrush"),
             };
+            card.SetResourceReference(Control.BorderBrushProperty, chosen ? "AccentFillColorDefaultBrush" : "CardStrokeColorDefaultBrush");
             card.Click += (_, _) =>
             {
+                // A custom look matches no card: keep it, so one click does not lose it for good.
+                if (LookPresets.Matching(_s) == null) _beforePreset = _s.Copy();
                 preset.Apply(_s);
                 _s.LookPreset = preset.Name;
                 Changed(lyricsAffected: true);
-                Show("look");
+                Show("look", rebuild: true);
             };
             gallery.Children.Add(card);
         }
@@ -410,7 +455,7 @@ public partial class SettingsWindow : Window
         p.Children.Add(Card("Glow on sung words", null, Toggle(_s.WordGlow, v => _s.WordGlow = v), "\uE706"));
 
         p.Children.Add(Group("Full lyrics window"));
-        p.Children.Add(Card("Motion", "How words lift and glow and how the lines move. Apple Music, Glow, Float, Calm or Snappy.",
+        p.Children.Add(Card("Motion", "How words lift and glow and how the lines move.",
             Combo(_s.LyricsMotion, LookPresets.MotionNames, v => _s.LyricsMotion = v), "\uE8BC"));
 
         p.Children.Add(Group("Colours"));
@@ -422,7 +467,7 @@ public partial class SettingsWindow : Window
 
         p.Children.Add(Group("Text"));
         var fonts = new ComboBox { MinWidth = 240, IsEditable = true, Text = _s.FontFamily };
-        foreach (var f in Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(x => x)) fonts.Items.Add(f);
+        fonts.DropDownOpened += (_, _) => { if (fonts.Items.Count == 0) foreach (var f in FontNames.Value) fonts.Items.Add(f); };
         fonts.SelectionChanged += (_, _) => { if (fonts.SelectedItem is string f) { _s.FontFamily = f; Changed(); } };
         fonts.LostFocus += (_, _) => { if (fonts.Text.Length > 0) { _s.FontFamily = fonts.Text; Changed(); } };
         p.Children.Add(Card("Font", "Japanese, Korean and Chinese fall back to Yu Gothic, Malgun Gothic and YaHei.", fonts, ""));
@@ -502,7 +547,7 @@ public partial class SettingsWindow : Window
         }
         Rebuild();
         p.Children.Add(list);
-        var reset = Btn("Restore default order", () => { _s.Sources = AppSettings.DefaultSources(); Changed(); Show("sources"); });
+        var reset = Btn("Restore default order", () => { _s.Sources = AppSettings.DefaultSources(); Changed(); Show("sources", rebuild: true); });
         reset.HorizontalAlignment = HorizontalAlignment.Left;
         reset.Margin = new Thickness(0, 6, 0, 0);
         p.Children.Add(reset);
@@ -642,7 +687,7 @@ public partial class SettingsWindow : Window
             _s.SongOffsets.Clear();
             _app.Settings.SongOffsets.Clear();
             Changed();
-            Show("timing");
+            Show("timing", rebuild: true);
         }), ""));
         return p;
     }
@@ -668,7 +713,7 @@ public partial class SettingsWindow : Window
         };
         RenderOptions.SetBitmapScalingMode(qr.Child, BitmapScalingMode.NearestNeighbor);
         p.Children.Add(Card("Scan with your phone", _s.WebEnabled
-            ? "Point your phone's camera at the code. It has to be on the same Wi-Fi."
+            ? "Your phone has to be on the same Wi-Fi."
             : "Turn on the web view first, then scan the code.", qr, ""));
         var obs = url + "obs";
         p.Children.Add(Card("Link for OBS (transparent)", obs, Btn("Copy", () => Clipboard.SetText(obs)), ""));
@@ -721,16 +766,18 @@ public partial class SettingsWindow : Window
         p.Children.Add(Card("Check for updates automatically", "At start-up and every six hours, from GitHub releases.", Toggle(_s.CheckUpdates, v => _s.CheckUpdates = v), "\uE895"));
 
         p.Children.Add(Group("Keyboard shortcuts"));
-        p.Children.Add(Card("Global shortcuts", "Work from any app.", Toggle(_s.GlobalHotkeys, v => _s.GlobalHotkeys = v), "\uE765"));
+        p.Children.Add(Card("Global shortcuts", null,Toggle(_s.GlobalHotkeys, v => _s.GlobalHotkeys = v), "\uE765"));
         var keys = new Grid();
         keys.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(190) });
         keys.ColumnDefinitions.Add(new ColumnDefinition());
         int row = 0;
+        var failedKeys = _app.FailedHotkeys;
         foreach (var (k, what) in Hotkeys.Defaults)
         {
             keys.RowDefinitions.Add(new RowDefinition { Height = new GridLength(26) });
-            var kt = new TextBlock { Text = k, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
-            var wt = new TextBlock { Text = what, Opacity = 0.75, VerticalAlignment = VerticalAlignment.Center };
+            bool taken = _s.GlobalHotkeys && row < Hotkeys.DefaultKeys.Length && Hotkeys.DefaultKeys[row].Any(failedKeys.Contains);
+            var kt = new TextBlock { Text = k, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center, Opacity = taken ? 0.5 : 1 };
+            var wt = new TextBlock { Text = taken ? what + "  (in use by another app)" : what, Opacity = taken ? 0.5 : 0.75, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetRow(kt, row); Grid.SetRow(wt, row); Grid.SetColumn(wt, 1);
             keys.Children.Add(kt); keys.Children.Add(wt);
             row++;

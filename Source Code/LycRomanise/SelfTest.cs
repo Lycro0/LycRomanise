@@ -147,10 +147,12 @@ static class SelfTest
             ("empty lines", "[00:01.00]\n[00:02.00]a\n[00:03.00]   \n[00:04.00]b", 2),
             ("over an hour", "[61:00.00]long\n[61:05.00]song", 2),
             ("garbage", "this is not lrc at all\njust text", 0),
-            ("broken tags", "[00:aa.00]x\n[0:1.0]y\n[00:02.00]ok", 1),
+            // [0:1.0] is a valid terse stamp, so use one the stamp regex really rejects
+            ("broken tags", "[00:aa.00]x\n[0:1x.0]y\n[00:02.00]ok", 1),
             ("angle only", "<00:01.00>a <00:02.00>b", 0),
             ("emoji+cjk", "[00:01.00]사랑해 💕\n[00:02.00]夢を見た", 2),
-            ("credits header", "[00:00.10]作词 : 某人\n[00:00.20]作曲 : 某人\n[00:05.00]real line\n[00:07.00]second", 2),
+            // ParseLrc keeps credits; SourceUtil.Result drops them (checked below)
+            ("credits header raw", "[00:00.10]作词 : 某人\n[00:00.20]作曲 : 某人\n[00:05.00]real line\n[00:07.00]second", 4),
         };
         foreach (var (name, text, n) in lrcs)
             Safe($"lrc {name}", () =>
@@ -161,6 +163,12 @@ static class SelfTest
                 bool ends = lines == null || lines.All(l => l.End >= l.Start);
                 Check($"lrc {name}", got == n && sorted && ends, $"lines={got} (want {n}) sorted={sorted} endsOk={ends}" + (lines is { Count: > 0 } ? $" first=\"{lines[0].Text}\"@{lines[0].Start}" : ""));
             });
+        Safe("lrc credits header", () =>
+        {
+            var r = SourceUtil.Result("t", "t", Formats.ParseLrc("[00:00.10]作词 : 某人\n[00:00.20]作曲 : 某人\n[00:05.00]real line\n[00:07.00]second"));
+            Check("lrc credits header dropped by SourceUtil.Result", r != null && r.Lines.Count == 2 && r.Lines[0].Text == "real line",
+                r == null ? "null" : $"lines={r.Lines.Count} first=\"{(r.Lines.Count > 0 ? r.Lines[0].Text : "")}\"");
+        });
         Safe("lrc offset applied", () =>
         {
             var l = Formats.ParseLrc("[offset:+500]\n[00:01.00]a\n[00:02.00]b");

@@ -145,7 +145,6 @@ public partial class OverlayWindow : Window
             var bg = Theme.ParseColor(_app.Settings.BackgroundColor, Colors.Black);
             Panel.Background = new SolidColorBrush(Color.FromArgb((byte)(_app.Settings.BackgroundOpacity * 255), bg.R, bg.G, bg.B));
         }
-        // The desktop strip never shows where the lyrics came from (the lyrics window and Settings do).
         CreditText.BeginAnimation(OpacityProperty, null);
         CreditText.Opacity = 0;
     }

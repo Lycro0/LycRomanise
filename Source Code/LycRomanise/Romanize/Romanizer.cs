@@ -4,8 +4,7 @@ using LycRomanise.Core;
 
 namespace LycRomanise.Romanize;
 
-/// <summary>Splits a line into runs by script and romanizes each with its own engine. Latin text is
-/// left as it is. Han characters read as Japanese in a Japanese song, else as Chinese.</summary>
+// Han characters read as Japanese in a Japanese song, else as Chinese.
 public static class Romanizer
 {
     static string? Class(char ch)
@@ -20,26 +19,49 @@ public static class Romanizer
         if ((o >= 0x0370 && o <= 0x03FF) || (o >= 0x1F00 && o <= 0x1FFF)) return "el";
         if ((o >= 0x0590 && o <= 0x05FF) || (o >= 0xFB1D && o <= 0xFB4F)) return "he";
         if (o >= 0x0900 && o <= 0x097F) return "hi";
+        // 々 〆 〇 〻 belong to the kanji word, so 人々 reaches the reader whole
+        if ((o >= 0x3005 && o <= 0x3007) || o == 0x303B) return "han";
         return null;
     }
 
-    public static bool Needs(string? text) => !string.IsNullOrEmpty(text) && text.Any(c => Class(c) != null);
+    // Long marks and middle dots also show up as dashes in Chinese and Korean text, so they say nothing about the script
+    static bool ScriptNeutralKana(char ch) => ch is '゠' or '・' or 'ー' or '･' or 'ｰ';
 
-    /// <summary>The dominant non-Latin script: ko, ja, zh, ar, ru, el, he, hi, or null.</summary>
-    public static string? DetectScript(string? text)
+    static Dictionary<string, int> Counts(string text)
     {
-        if (string.IsNullOrEmpty(text)) return null;
         var counts = new Dictionary<string, int>();
-        foreach (var ch in text) if (Class(ch) is { } c) counts[c] = counts.GetValueOrDefault(c) + 1;
+        foreach (var ch in text)
+            if (!ScriptNeutralKana(ch) && Class(ch) is { } c) counts[c] = counts.GetValueOrDefault(c) + 1;
+        return counts;
+    }
+
+    static string? Pick(Dictionary<string, int> counts)
+    {
         if (counts.Count == 0) return null;
-        if (counts.ContainsKey("kana")) return "ja";
         if (counts.Remove("han", out var han)) counts["zh"] = han;
         if (counts.GetValueOrDefault("ko") > 0 && counts["ko"] >= counts.GetValueOrDefault("zh")) return "ko";
         return counts.MaxBy(kv => kv.Value).Key;
     }
 
-    /// <summary>The script of a whole song, so Han-only lines in a Japanese song read as Japanese.</summary>
-    public static string? SongScript(IEnumerable<LyricLine> lines) => DetectScript(string.Concat(lines.Select(l => l.Text)));
+    public static bool Needs(string? text) => !string.IsNullOrEmpty(text) && text.Any(c => Class(c) != null);
+
+    public static string? DetectScript(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        var counts = Counts(text);
+        if (counts.ContainsKey("kana")) return "ja";
+        return Pick(counts);
+    }
+
+    // Kana must be a real share of the CJK text, so one の or credit line cannot turn a Chinese song Japanese.
+    public static string? SongScript(IEnumerable<LyricLine> lines)
+    {
+        var counts = Counts(string.Concat(lines.Select(l => l.Text)));
+        int kana = counts.GetValueOrDefault("kana"), han = counts.GetValueOrDefault("han"), ko = counts.GetValueOrDefault("ko");
+        if (kana > 0 && (kana >= 20 || kana * 10 >= kana + han) && kana >= ko) return "ja";
+        counts.Remove("kana");
+        return Pick(counts) ?? (kana > 0 ? "ja" : null);
+    }
 
     static string Engine(string cls, string chunk) => cls switch
     {
@@ -101,9 +123,7 @@ public static class Romanizer
         return Regex.Replace(outp.ToString(), " {2,}", " ").Trim();
     }
 
-    /// <summary>A romanized copy of the line, timed to it: word by word for spaced scripts, and spread
-    /// along the line's own timing for Japanese and Chinese, which need the whole line for context.
-    /// null when the line has nothing to romanize.</summary>
+    // Japanese and Chinese need the whole line for context, so their reading is spread along the line's timing.
     public static LyricLine? ForLine(LyricLine line, string? hint)
     {
         var text = line.Text;
@@ -113,8 +133,7 @@ public static class Romanizer
         if (!unspaced)
         {
             var copy = new LyricLine { Start = line.Start, End = line.End, Align = line.Align, Estimated = line.Estimated };
-            // Syllable-timed words (joined pieces) are put back together and romanized as one word, so the sound
-            // changes across syllables (말해줄래 malhaejullae, 멀어 meoreo) come out right.
+            // Joined syllables are romanized as one word so sound changes across them (멀어 meoreo) come out right.
             for (int i = 0; i < line.Words.Count;)
             {
                 int j = i + 1;

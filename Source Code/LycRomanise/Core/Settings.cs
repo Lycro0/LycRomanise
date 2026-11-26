@@ -9,9 +9,7 @@ public enum DisplayMode { RomanizedOnly, OriginalAndRomanized, OriginalOnly }
 public enum ThemeChoice { System, Dark, Light }
 public enum NowPlayingFormat { ArtistTitle, TitleArtist, Title }
 public enum StripAlign { Center, Left, Right }
-/// <summary>How the strip lays its lines out.</summary>
 public enum StripStyle { Classic, Modern, Minimal }
-/// <summary>How the full lyrics window moves.</summary>
 public enum LyricsMotion { AppleMusic, Glow, Float, Calm, Snappy }
 public enum LyricsBackground { Cover, Black }
 
@@ -29,16 +27,14 @@ public sealed class AppSettings
     public bool WordGlow { get; set; } = true;
     public string LookPreset { get; set; } = "Minimal";
     public LyricsMotion LyricsMotion { get; set; } = LyricsMotion.AppleMusic;
-    /// <summary>The full lyrics window's background: the blurred cover, or plain black.</summary>
     public LyricsBackground LyricsBackground { get; set; } = LyricsBackground.Cover;
-    /// <summary>Hide the full lyrics window's buttons while the mouse is still.</summary>
     public bool LyricsAutoHideTools { get; set; } = true;
     public bool LyricsPanelHidden { get; set; }
     public string UnsungColor { get; set; } = "#B3FFFFFF";
     public string SungColor { get; set; } = "#FFFFFF";
     public string NextLineColor { get; set; } = "#80FFFFFF";
     public string OutlineColor { get; set; } = "#000000";
-    public string SubColor { get; set; } = "#B3FFFFFF";           // romanization / translation under the line
+    public string SubColor { get; set; } = "#B3FFFFFF";
     public string BackgroundColor { get; set; } = "#1C1C24";
     public double BackgroundOpacity { get; set; } = 0.0;           // 0 = see-through strip, text only
     public double CornerRadius { get; set; } = 22;
@@ -53,7 +49,7 @@ public sealed class AppSettings
     public bool ShowNextLine { get; set; } = true;
     public bool ShowBackingVocals { get; set; } = true;
     public bool ShowTitleCard { get; set; } = true;
-    /// <summary>No longer an option: the source is never shown by choice (only where a source requires it).</summary>
+    // Not an option: the source is shown only where a source requires it.
     [JsonIgnore] public bool ShowSourceCredit => false;
     public bool SmoothSweep { get; set; } = true;
     public ThemeChoice Theme { get; set; } = ThemeChoice.Dark;
@@ -75,7 +71,6 @@ public sealed class AppSettings
     // ---- Sources ----
     public List<SourceEntry> Sources { get; set; } = DefaultSources();
     public string ImportedFolder { get; set; } = Paths.DefaultImported;
-    /// <summary>Keep asking down the list for word timing when a source only times lines.</summary>
     public bool PreferWordSync { get; set; } = true;
     public Dictionary<string, string> SongSourceOverride { get; set; } = new();
     [JsonPropertyName("SpicyKeyProtected")] public string? SpicyKeyProtected { get; set; }
@@ -84,7 +79,6 @@ public sealed class AppSettings
     public bool WebEnabled { get; set; } = true;
     public int WebPort { get; set; } = 8765;
     public bool HideDesktopStrip { get; set; }
-    /// <summary>Hide the strip while the full lyrics window is open (and not minimized).</summary>
     public bool HideStripWithLyricsWindow { get; set; } = true;
     public bool NowPlayingFile { get; set; } = true;
     public NowPlayingFormat NowPlayingFormat { get; set; } = NowPlayingFormat.Title;
@@ -92,7 +86,6 @@ public sealed class AppSettings
     // ---- Spotify ----
     public string? SpotifyClientId { get; set; }
     public string? SpotifyRefreshProtected { get; set; }
-    /// <summary>Looks up the lyrics of the next song in the queue ahead of time.</summary>
     public bool PrefetchNext { get; set; } = true;
 
     [JsonIgnore]
@@ -163,22 +156,42 @@ public sealed class AppSettings
         NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
     };
 
+    // Set when settings.json could not be read at all: this session runs on defaults and must not overwrite it.
+    static bool _readOnly;
+
     public static AppSettings Load()
     {
         AppSettings s;
         bool first = !File.Exists(Paths.Settings);
-        try
+        string? text = null;
+        bool unreadable = false;
+        if (!first)
         {
-            s = File.Exists(Paths.Settings)
-                ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(Paths.Settings), Json) ?? new()
-                : new();
+            // A backup or sync tool can hold the file briefly at logon; wait a little rather than treat it as broken.
+            for (int i = 0; ; i++)
+            {
+                try { text = File.ReadAllText(Paths.Settings); break; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    if (i >= 4) { Log.Error("settings read", ex); unreadable = true; break; }
+                    Thread.Sleep(150);
+                }
+            }
         }
+        if (unreadable)
+        {
+            _readOnly = true;
+            s = new();
+            s.Sanitize();
+            return s;
+        }
+        _readOnly = false;
+        try { s = text == null ? new() : JsonSerializer.Deserialize<AppSettings>(text, Json) ?? new(); }
         catch (Exception ex)
         {
             Log.Error("settings load", ex);
-            // Keep the unreadable file, and keep every setting in it that still reads, rather than starting over.
             try { File.Copy(Paths.Settings, Paths.Settings + $".broken-{DateTime.Now:yyyyMMdd-HHmmss}", true); } catch { }
-            s = Salvage(File.ReadAllText(Paths.Settings));
+            s = Salvage(text!);
         }
         if (first) s.ImportFromV1();
         else if (s.DefaultsVersion < CurrentDefaults)
@@ -186,14 +199,17 @@ public sealed class AppSettings
             s.ApplyCurrentDefaults();
             Log.Info($"settings: updated to the v{CurrentDefaults} default setup");
         }
-        s.DefaultsVersion = CurrentDefaults;
+        // Never lower it: an older build writing its own number back would make the newer one reset the look again.
+        s.DefaultsVersion = Math.Max(s.DefaultsVersion, CurrentDefaults);
         s.Sanitize();
         if (!first) s.Save();
         return s;
     }
 
-    /// <summary>Reads what it can from a settings file with a bad value in it: each setting is tried on its
-    /// own and the ones that fail keep their defaults.</summary>
+    // Settings from a newer build, kept so a save does not drop them.
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
+
+    // Each setting is tried on its own, so one bad value only resets that setting.
     static AppSettings Salvage(string text)
     {
         try
@@ -212,13 +228,12 @@ public sealed class AppSettings
         catch { return new(); }
     }
 
-    /// <summary>Raised when the default setup changes; existing installs then take the new one once.</summary>
+    // Raised when the default setup changes; existing installs then take the new one once.
     public const int CurrentDefaults = 3;
     // 0 in files written before this existed, so those installs take the default setup once.
     public int DefaultsVersion { get; set; }
 
-    /// <summary>The settings that make up the default setup (look, display and behaviour). Personal state is not
-    /// touched: strip and window positions, the lock, per-song timing and choices, Spotify login, keys, folders.</summary>
+    // Personal state (positions, lock, per-song choices, logins, keys, folders) is left out on purpose.
     static readonly string[] SetupSettings =
     {
         nameof(StripStyle), nameof(WordLift), nameof(WordGlow), nameof(LookPreset), nameof(LyricsMotion), nameof(LyricsBackground),
@@ -243,13 +258,13 @@ public sealed class AppSettings
 
     public void Save()
     {
+        if (_readOnly) return;
         try { Paths.WriteAtomic(Paths.Settings, JsonSerializer.Serialize(this, Json)); }
         catch (Exception ex) { Log.Error("settings save", ex); }
     }
 
     public AppSettings Copy() { var c = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(this, Json), Json)!; c.Sanitize(); return c; }
 
-    /// <summary>On the first start, the colours, size and toggles from LycRomanise 1.x (appearance.json).</summary>
     void ImportFromV1()
     {
         try

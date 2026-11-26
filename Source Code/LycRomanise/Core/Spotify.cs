@@ -18,8 +18,7 @@ public sealed record SpotifyTrack(
 
 public sealed record SpotifyNow(SpotifyTrack? Track, long ProgressMs, bool Playing, DateTime At);
 
-/// <summary>Spotify Web API on the user's own login (Authorization Code with PKCE, no secret). Only the
-/// read endpoints are used (what is playing and what is queued), and they work on free accounts too.</summary>
+// PKCE, so no client secret is needed; the read-only endpoints used here work on free accounts.
 public sealed class SpotifyClient
 {
     public const string RedirectUri = "http://127.0.0.1:43821/callback";
@@ -31,6 +30,7 @@ public sealed class SpotifyClient
     DateTime _expires;
     readonly SemaphoreSlim _gate = new(1, 1);
     DateTime _backoffUntil;
+    DateTime _refreshRetryAt;
 
     public string? UserName { get; private set; }
     public bool LoggedIn => !string.IsNullOrEmpty(_settings().SpotifyRefreshToken) && !string.IsNullOrEmpty(_settings().SpotifyClientId);
@@ -42,11 +42,10 @@ public sealed class SpotifyClient
         _save = save;
     }
 
-    // ------------------------------------------------------------------ login
+    // ---- login ----
     static string B64Url(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    /// <summary>Opens Spotify's login page in the browser and waits for it to send the browser back
-    /// to the app on 127.0.0.1. Returns null on success, else what went wrong.</summary>
+    // Returns null on success, else the error to show.
     public async Task<string?> LoginAsync(CancellationToken ct)
     {
         var clientId = _settings().SpotifyClientId?.Trim();
@@ -85,7 +84,7 @@ public sealed class SpotifyClient
                 if (query["state"] != state) { await Reply(stream, "This login link is out of date. Try again from LycRomanise."); return "The login was not the one LycRomanise started."; }
                 if (query["error"] is { } err) { await Reply(stream, "Spotify login was cancelled. You can close this tab."); return "Spotify said: " + err; }
                 var code = query["code"];
-                var tokenErr = await ExchangeAsync(new Dictionary<string, string>
+                var (tokenErr, _) = await ExchangeAsync(new Dictionary<string, string>
                 {
                     ["grant_type"] = "authorization_code", ["code"] = code ?? "", ["redirect_uri"] = RedirectUri,
                     ["client_id"] = clientId, ["code_verifier"] = verifier,
@@ -110,21 +109,31 @@ public sealed class SpotifyClient
         await stream.WriteAsync(body);
     }
 
-    async Task<string?> ExchangeAsync(Dictionary<string, string> form, CancellationToken ct)
+    // Permanent only for invalid_grant/invalid_client, so a 5xx or network error never deletes the refresh token.
+    async Task<(string? Error, bool Permanent)> ExchangeAsync(Dictionary<string, string> form, CancellationToken ct)
     {
         try
         {
             using var resp = await Http.Client.PostAsync("https://accounts.spotify.com/api/token", new FormUrlEncodedContent(form), ct);
-            var json = JsonNode.Parse(await resp.Content.ReadAsStringAsync(ct));
-            if (!resp.IsSuccessStatusCode) return json.Dig("error_description").Str() ?? json.Dig("error").Str() ?? resp.StatusCode.ToString();
-            _accessToken = json.Dig("access_token").Str();
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            JsonNode? json = null;
+            try { if (!string.IsNullOrWhiteSpace(body)) json = JsonNode.Parse(body); } catch (System.Text.Json.JsonException) { }
+            if (!resp.IsSuccessStatusCode)
+            {
+                var code = json.Dig("error").Str();
+                int status = (int)resp.StatusCode;
+                bool permanent = (status == 400 || status == 401) && (code == "invalid_grant" || code == "invalid_client");
+                return (json.Dig("error_description").Str() ?? code ?? $"HTTP {status}", permanent);
+            }
+            if (json.Dig("access_token").Str() is not { } token) return ("Spotify sent an unreadable token reply.", false);
+            _accessToken = token;
             _expires = DateTime.UtcNow.AddSeconds(json.Dig("expires_in").Num() - 60);
             if (json.Dig("refresh_token").Str() is { } refresh) { _settings().SpotifyRefreshToken = refresh; _save(); }
             LastError = null;
-            return null;
+            return (null, false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { return ex.Message; }
+        catch (Exception ex) { return (ex.Message, false); }
     }
 
     public void Logout()
@@ -142,7 +151,8 @@ public sealed class SpotifyClient
         try
         {
             if (_accessToken != null && DateTime.UtcNow < _expires) return _accessToken;
-            var err = await ExchangeAsync(new Dictionary<string, string>
+            if (DateTime.UtcNow < _refreshRetryAt) return null;
+            var (err, permanent) = await ExchangeAsync(new Dictionary<string, string>
             {
                 ["grant_type"] = "refresh_token", ["refresh_token"] = _settings().SpotifyRefreshToken!, ["client_id"] = _settings().SpotifyClientId!,
             }, ct);
@@ -150,7 +160,8 @@ public sealed class SpotifyClient
             {
                 LastError = err;
                 Log.Info("spotify: refresh failed: " + err);
-                if (err.Contains("revoked", StringComparison.OrdinalIgnoreCase) || err.Contains("invalid", StringComparison.OrdinalIgnoreCase)) Logout();
+                if (permanent) Logout();
+                else _refreshRetryAt = DateTime.UtcNow.AddSeconds(60);
                 return null;
             }
             return _accessToken;

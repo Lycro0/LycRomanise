@@ -5,7 +5,6 @@
         Title="Lyrics - LycRomanise" Width="1180" Height="760" MinWidth="520" MinHeight="420"
         Background="#0B0B10" Icon="/Assets/lyrics-overlay.ico" ThemeMode="Dark">
     <Grid x:Name="Root" ClipToBounds="True">
-        <!-- Blurred, slowly drifting cover behind everything. -->
         <Grid x:Name="BackdropHost" RenderTransformOrigin="0.5,0.5">
             <Grid.RenderTransform>
                 <TransformGroup>
@@ -13,14 +12,18 @@
                     <RotateTransform x:Name="DriftRotate" Angle="0"/>
                 </TransformGroup>
             </Grid.RenderTransform>
-            <Image x:Name="Backdrop" Stretch="UniformToFill" Opacity="0.85">
-                <Image.Effect>
-                    <BlurEffect Radius="110" KernelType="Gaussian" RenderingBias="Performance"/>
-                </Image.Effect>
-                <Image.CacheMode>
+            <!-- The cache sits above the blur, so the drift only resamples an already blurred bitmap
+                 instead of running the 110 px blur again every frame. -->
+            <Grid>
+                <Grid.CacheMode>
                     <BitmapCache RenderAtScale="0.35"/>
-                </Image.CacheMode>
-            </Image>
+                </Grid.CacheMode>
+                <Image x:Name="Backdrop" Stretch="UniformToFill" Opacity="0.85" RenderOptions.BitmapScalingMode="Linear">
+                    <Image.Effect>
+                        <BlurEffect Radius="110" KernelType="Gaussian" RenderingBias="Performance"/>
+                    </Image.Effect>
+                </Image>
+            </Grid>
         </Grid>
         <Rectangle x:Name="Fallback">
             <Rectangle.Fill>
@@ -40,7 +43,6 @@
             </Rectangle.Fill>
         </Rectangle>
 
-        <!-- The plain black background option (instead of the blurred cover). -->
         <Rectangle x:Name="BlackBg" Fill="#FF050506" Visibility="Collapsed"/>
 
         <Grid Margin="0,0,0,0">
@@ -49,7 +51,6 @@
                 <ColumnDefinition Width="1.18*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Now playing -->
             <Grid x:Name="NowPanel" Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="40,30,20,30" MaxWidth="420">
                 <StackPanel>
                     <Border x:Name="CoverCard" CornerRadius="14" Width="360" Height="360" Background="#33FFFFFF" ClipToBounds="True">
@@ -71,7 +72,6 @@
                     <TextBlock x:Name="ArtistText" Margin="0,2,0,0" FontSize="18" Foreground="#B3FFFFFF"
                                TextTrimming="CharacterEllipsis" Width="360"/>
 
-                    <!-- Progress -->
                     <Grid Width="360" Margin="0,18,0,0">
                         <Border x:Name="Track" Height="6" CornerRadius="3" Background="#40FFFFFF" Cursor="Hand"
                                 MouseLeftButtonUp="Track_Click"/>
@@ -95,7 +95,6 @@
             <ui:LyricsPageView x:Name="Page" Grid.Column="1" Margin="0,0,10,0"/>
         </Grid>
 
-        <!-- Top-right tools -->
         <StackPanel x:Name="Tools" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,14,18,0">
             <Button Style="{StaticResource OverlayButton}" Click="Smaller_Click" Content="&#xE8E7;" ToolTip="Smaller text"/>
             <Button Style="{StaticResource OverlayButton}" Click="Bigger_Click" Content="&#xE8E8;" ToolTip="Bigger text"/>
@@ -106,7 +105,6 @@
             <Button x:Name="GearBtn" Style="{StaticResource OverlayButton}" Click="Gear_Click" Content="&#xE713;" ToolTip="Settings for this window (S)"/>
         </StackPanel>
 
-        <!-- Settings panel, slides in from the right. -->
         <Border x:Name="SettingsPanel" HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="340" Margin="0,58,16,16"
                 CornerRadius="14" Background="#F00C0C0E" BorderBrush="#22FFFFFF" BorderThickness="1" Visibility="Collapsed">
             <Border.RenderTransform><TranslateTransform x:Name="PanelSlide" X="0"/></Border.RenderTransform>

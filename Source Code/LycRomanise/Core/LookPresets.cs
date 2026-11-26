@@ -1,7 +1,5 @@
 namespace LycRomanise.Core;
 
-/// <summary>A whole look for the strip in one click: layout, colours, outline, glow, background and
-/// how the words move. Classic, the way LycRomanise 1.x looked, comes first and is the default.</summary>
 public sealed record LookPreset(string Name, string Description, Action<AppSettings> Apply);
 
 public static class LookPresets
@@ -82,8 +80,32 @@ public static class LookPresets
 
     public static LookPreset? Find(string? name) => All.FirstOrDefault(p => p.Name == name);
 
-    /// <summary>The full lyrics window's motion styles, after Taurus's: how far words lift, how much they
-    /// glow, how far each line lags the one above, and how quickly the column moves.</summary>
+    // Display is left out: other settings pages change it too.
+    public static bool SameLook(AppSettings a, AppSettings b)
+    {
+        static bool C(string? x, string? y) => string.Equals(x, y, StringComparison.OrdinalIgnoreCase);
+        static bool D(double x, double y) => Math.Abs(x - y) < 0.001;
+        return a.StripStyle == b.StripStyle && C(a.UnsungColor, b.UnsungColor) && C(a.SungColor, b.SungColor)
+            && C(a.NextLineColor, b.NextLineColor) && C(a.SubColor, b.SubColor) && C(a.OutlineColor, b.OutlineColor)
+            && D(a.OutlineWidth, b.OutlineWidth) && a.Glow == b.Glow && D(a.WordLift, b.WordLift) && a.WordGlow == b.WordGlow
+            && a.Bold == b.Bold && C(a.BackgroundColor, b.BackgroundColor) && D(a.BackgroundOpacity, b.BackgroundOpacity)
+            && D(a.CornerRadius, b.CornerRadius) && D(a.FontSize, b.FontSize) && C(a.FontFamily, b.FontFamily);
+    }
+
+    public static LookPreset? Matching(AppSettings s) =>
+        All.FirstOrDefault(p => { var t = s.Copy(); p.Apply(t); return SameLook(t, s); });
+
+    // Used to undo a preset click, so Display and the preset name are copied too.
+    public static void CopyLook(AppSettings from, AppSettings to)
+    {
+        to.StripStyle = from.StripStyle; to.Display = from.Display;
+        Colours(to, from.UnsungColor, from.SungColor, from.NextLineColor, from.SubColor, from.OutlineColor);
+        to.OutlineWidth = from.OutlineWidth; to.Glow = from.Glow; to.WordLift = from.WordLift; to.WordGlow = from.WordGlow;
+        to.Bold = from.Bold; to.BackgroundColor = from.BackgroundColor; to.BackgroundOpacity = from.BackgroundOpacity;
+        to.CornerRadius = from.CornerRadius; to.FontSize = from.FontSize; to.FontFamily = from.FontFamily;
+        to.LookPreset = from.LookPreset;
+    }
+
     public static (double lift, double glow, double stagger, double scroll, double dim) Motion(LyricsMotion m) => m switch
     {
         LyricsMotion.Glow => (1.5, 1.0, 0.18, 9, 0.42),

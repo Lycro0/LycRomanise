@@ -7,7 +7,6 @@ using WinForms = System.Windows.Forms;
 
 namespace LycRomanise.UI;
 
-/// <summary>The tray icon, with a Fluent-styled WPF menu rather than the old Win32 one.</summary>
 public sealed class TrayIcon : IDisposable
 {
     readonly AppController _app;

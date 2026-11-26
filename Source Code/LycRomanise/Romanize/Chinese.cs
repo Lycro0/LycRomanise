@@ -3,8 +3,6 @@ using Microsoft.International.Converters.PinYinConverter;
 
 namespace LycRomanise.Romanize;
 
-/// <summary>Mandarin → pinyin with tone marks, with the 不 / 一 tone changes, common lyric readings of
-/// characters with several pronunciations, and Chinese punctuation made ordinary.</summary>
 public static class Chinese
 {
     // Characters whose first dictionary reading is the wrong one in everyday lyrics.
@@ -81,18 +79,54 @@ public static class Chinese
         return vi < 0 ? s : s[..at] + marks[tone - 1][vi] + s[(at + 1)..];
     }
 
+    // Two-character words whose polyphone differs from the per-character default ("" keeps the default).
+    static readonly Dictionary<string, string[]> Words = BuildWords();
+    static Dictionary<string, string[]> BuildWords()
+    {
+        var d = new Dictionary<string, string[]>();
+        void Add(string first, string second, params string[] words) { foreach (var w in words) d[w] = new[] { first, second }; }
+        Add("chong2", "", "重新", "重来", "重來", "重逢", "重复", "重複", "重生", "重温", "重溫");
+        Add("", "zhang3", "成长", "成長", "生长", "生長");
+        Add("zhang3", "", "长大", "長大");
+        Add("de2", "", "得到", "得不");
+        Add("", "de2", "取得", "获得", "獲得");
+        Add("", "wei2", "成为", "成為", "以为", "以為", "认为", "認為", "作为", "作為", "化为", "化為", "变为", "變為", "视为", "視為");
+        Add("", "jiao4", "睡觉", "睡覺", "一觉", "一覺");
+        Add("jue2", "de5", "觉得", "覺得");
+        Add("liao3", "", "了解");
+        Add("zhao1", "", "朝阳", "朝陽", "朝夕");
+        Add("shu3", "", "数不", "數不");
+        Add("", "zhi1", "一只", "一隻");
+        return d;
+    }
+
     public static string Romanize(string text)
     {
         text = text.Normalize(NormalizationForm.FormKC);
         var readings = new List<string?>();
         foreach (var c in text) readings.Add(IsHan(c) ? Numbered(c) : null);
+        // Polyphones read differently inside common words; fix them before sandhi so 不/一 see the right tone.
+        for (int i = 0; i + 1 < text.Length; i++)
+        {
+            if (readings[i] == null || readings[i + 1] == null) continue;
+            if (!Words.TryGetValue(text.Substring(i, 2), out var w)) continue;
+            if (w[0] != "") readings[i] = w[0];
+            if (w[1] != "") readings[i + 1] = w[1];
+        }
+        // 地 after a doubled character (轻轻地, 慢慢地) is the adverb particle de.
+        for (int i = 2; i < text.Length; i++)
+            if (text[i] == '地' && text[i - 1] == text[i - 2] && readings[i - 1] != null) readings[i] = "de5";
         // Tone changes: 不 before a 4th tone is bú; 一 before a 4th tone is yí, before tones 1 to 3 yì.
         for (int i = 0; i < text.Length; i++)
         {
             if (readings[i] == null) continue;
             var next = i + 1 < text.Length ? readings[i + 1] : null;
             if (text[i] == '不' && ToneOf(next) == 4) readings[i] = "bu2";
-            if (text[i] == '一' && next != null) readings[i] = ToneOf(next) == 4 ? "yi2" : "yi4";
+            // Ordinals and numbers (第一, 唯一, 十一, 一二三) keep yī.
+            var prev = i > 0 ? text[i - 1] : '\0';
+            bool keep = "第唯统統万萬初十〇一二三四五六七八九".Contains(prev)
+                || (i + 1 < text.Length && "〇一二三四五六七八九".Contains(text[i + 1]));
+            if (text[i] == '一' && next != null && !keep) readings[i] = ToneOf(next) == 4 ? "yi2" : "yi4";
         }
         var parts = new List<string>();
         var latin = new StringBuilder();

@@ -10,7 +10,6 @@
             <ui:KaraokeView x:Name="View" Margin="0,4,0,4"/>
         </Border>
 
-        <!-- Hover controls, shown only while the strip is unlocked. -->
         <StackPanel x:Name="Controls" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top"
                     Margin="0,6,10,0" Opacity="0" IsHitTestVisible="False">
             <Button x:Name="LyricsBtn" ToolTip="Full lyrics" Click="Lyrics_Click" Style="{StaticResource OverlayButton}" Content="&#xE8BC;"/>
@@ -21,7 +20,6 @@
             <Button x:Name="LockBtn" ToolTip="Lock in place (click-through)" Click="Lock_Click" Style="{StaticResource OverlayButton}" Content="&#xE72E;"/>
         </StackPanel>
 
-        <!-- A small unlock pill, kept clickable while the rest of the strip is click-through. -->
         <TextBlock x:Name="CreditText" Visibility="Collapsed" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="14,0,0,2"
                    FontSize="10" Foreground="#99FFFFFF" Opacity="0"/>
     </Grid>

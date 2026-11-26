@@ -51,10 +51,21 @@ const q = new URLSearchParams(location.search);
 // ?bg=1a1a2e previews the page on a colour instead of transparent (OBS ignores it unless set).
 if (q.get("bg")) document.documentElement.style.background = "#" + q.get("bg").replace(/[^0-9a-fA-F]/g, "");
 
+// The request takes time both ways: the server read pos about halfway through it.
+function applyState(s, at) {
+  if (state && s.playing && state.playing && s.title === state.title) {
+    const cur = now(), fresh = s.pos + (performance.now() - at);
+    // A few ms back from request jitter: keep the clock going forward, so a line start does not flicker.
+    if (fresh < cur && cur - fresh < 80) { const pos = state.pos, a = stateAt; state = s; state.pos = pos; stateAt = a; return; }
+  }
+  state = s; stateAt = at;
+}
+
 async function poll() {
   try {
+    const t0 = performance.now();
     const s = await (await fetch("/state", { cache: "no-store" })).json();
-    state = s; stateAt = performance.now();
+    applyState(s, (t0 + performance.now()) / 2);
     const r = document.documentElement.style;
     // The app writes #AARRGGBB; CSS reads #RRGGBBAA.
     const css = c => c && c.length === 9 ? "#" + c.slice(3) + c.slice(1, 3) : c;
@@ -70,10 +81,11 @@ async function poll() {
     document.body.style.fontFamily = `"${s.font}", "Segoe UI", system-ui, sans-serif`;
     if (s.v !== version) { lyrics = await (await fetch("/lyrics", { cache: "no-store" })).json(); version = s.v; shown = -3; }
   } catch (e) { }
-  setTimeout(poll, 1000);
+  setTimeout(poll, 250);   // pauses and seeks show within a quarter second
 }
 
-function now() { return !state ? 0 : state.playing ? state.pos + (performance.now() - stateAt) : state.pos; }
+// Capped: if the app stops answering, the clock stops instead of running on from the last answer.
+function now() { return !state ? 0 : state.playing ? state.pos + Math.min(performance.now() - stateAt, 1500) : state.pos; }
 
 function words(line, cls) {
   const d = document.createElement("div");

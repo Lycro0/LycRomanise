@@ -27,8 +27,7 @@ public static class Theme
         Brand();
     }
 
-    /// <summary>The LycRomanise look: black, white, and red in place of the Windows accent colour. The Fluent
-    /// theme bakes the accent into its own brushes, so those brushes are recoloured where they live.</summary>
+    // Red in place of the Windows accent: the Fluent theme bakes the accent into its own brushes, so they are recoloured in place.
     static void Brand()
     {
         var app = Application.Current.Resources;
@@ -36,7 +35,6 @@ public static class Theme
         bool dark = Application.Current.ThemeMode == ThemeMode.Dark || (Application.Current.ThemeMode == ThemeMode.System && IsSystemDark());
         IsDark = dark;
         if (dark) { app["LayerFillColorDefaultBrush"] = Frozen(Color.FromRgb(0x10, 0x10, 0x12)); }
-        // Every accent shade the theme knows -> the matching red shade.
         var shades = new (string key, Color to)[]
         {
             ("SystemAccentColor", red),
@@ -79,7 +77,7 @@ public static class Theme
     }
 
     public static bool IsDark { get; private set; }
-    /// <summary>Near-black window background in dark mode (instead of Windows' grey material).</summary>
+    // Near-black instead of Windows' grey material in dark mode.
     public static void Paint(Window w)
     {
         if (IsDark) w.Background = Frozen(Color.FromRgb(0x05, 0x05, 0x06));
@@ -105,7 +103,7 @@ public static class Theme
     }
 }
 
-/// <summary>Lets a second launch tell the running copy to open its settings.</summary>
+// Lets a second launch tell the running copy to open its settings or lyrics window.
 public static class IpcSignal
 {
     public const string Settings = "LycRomanise.Modern.OpenSettings";
@@ -113,12 +111,21 @@ public static class IpcSignal
 
     public static void Send(string name = Settings)
     {
-        try { using var ev = EventWaitHandle.OpenExisting(name); ev.Set(); } catch { }
+        // The running copy may still be starting: keep trying for a few seconds before giving up.
+        for (int i = 0; i < 30; i++)
+        {
+            if (EventWaitHandle.TryOpenExisting(name, out var ev)) { using (ev) ev.Set(); return; }
+            Thread.Sleep(100);
+        }
+        LycRomanise.Core.Log.Info($"ipc: {name} not answered");
     }
 
-    public static void Listen(Action onSignal, string name = Settings)
+    // Created early so a signal sent before Listen runs is kept (auto-reset holds it).
+    public static EventWaitHandle Create(string name) => new(false, EventResetMode.AutoReset, name);
+
+    public static void Listen(Action onSignal, string name = Settings, EventWaitHandle? existing = null)
     {
-        var ev = new EventWaitHandle(false, EventResetMode.AutoReset, name);
+        var ev = existing ?? Create(name);
         var thread = new Thread(() =>
         {
             while (true) { ev.WaitOne(); onSignal(); }

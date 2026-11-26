@@ -7,24 +7,32 @@ using LycRomanise.Core;
 
 namespace LycRomanise.UI;
 
-/// <summary>The full lyrics, Apple Music style: the cover blurred behind, the player on the left, and
-/// every line on the right, following the song.</summary>
 public partial class LyricsWindow : Window
 {
     readonly AppController _app;
     readonly System.Windows.Threading.DispatcherTimer _tick;
     bool _panelHidden;
+    readonly List<AnimationClock> _drift = new();
+    readonly System.Windows.Threading.DispatcherTimer _saveSoon;
 
     public LyricsWindow(AppController app)
     {
         _app = app;
         InitializeComponent();
         var s = app.Settings;
-        // Never larger than the screen it opens on.
-        Width = Math.Min(s.LyricsWidth, SystemParameters.WorkArea.Width);
-        Height = Math.Min(s.LyricsHeight, SystemParameters.WorkArea.Height);
-        if (s.LyricsLeft is double l && s.LyricsTop is double t) { WindowStartupLocation = WindowStartupLocation.Manual; Left = l; Top = t; }
-        else WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        if (s.LyricsLeft is double l && s.LyricsTop is double t)
+        {
+            // Checked against the monitor it lands on once the window exists (see FitToMonitor).
+            Width = s.LyricsWidth; Height = s.LyricsHeight;
+            WindowStartupLocation = WindowStartupLocation.Manual; Left = l; Top = t;
+        }
+        else
+        {
+            Width = Math.Min(s.LyricsWidth, SystemParameters.WorkArea.Width);
+            Height = Math.Min(s.LyricsHeight, SystemParameters.WorkArea.Height);
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        }
+        SourceInitialized += (_, _) => FitToMonitor();
         Topmost = s.LyricsAlwaysOnTop;
         PinBtn.Opacity = Topmost ? 1 : 0.6;
         Page.FontSize = s.LyricsFontSize;
@@ -39,10 +47,17 @@ public partial class LyricsWindow : Window
         _tick.Tick += (_, _) => UpdateProgress();
         _tick.Start();
 
-        // A slow drift of the blurred cover, as Apple Music's background moves.
-        DriftRotate.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(-6, 6, TimeSpan.FromSeconds(40)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase() });
-        DriftScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.5, 1.75, TimeSpan.FromSeconds(28)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase() });
-        DriftScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.5, 1.75, TimeSpan.FromSeconds(28)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase() });
+        // 20 fps is plenty for a blurred image moving under a pixel per frame.
+        Drift(DriftRotate, RotateTransform.AngleProperty, new DoubleAnimation(-6, 6, TimeSpan.FromSeconds(40)));
+        Drift(DriftScale, ScaleTransform.ScaleXProperty, new DoubleAnimation(1.5, 1.75, TimeSpan.FromSeconds(28)));
+        Drift(DriftScale, ScaleTransform.ScaleYProperty, new DoubleAnimation(1.5, 1.75, TimeSpan.FromSeconds(28)));
+
+        // Saved soon after a change, not only on close, so a logoff or crash keeps them.
+        _saveSoon = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _saveSoon.Tick += (_, _) => { _saveSoon.Stop(); SaveBounds(); };
+        LocationChanged += (_, _) => SaveSoon();
+        SizeChanged += (_, _) => SaveSoon();
+        StateChanged += (_, _) => SaveSoon();
 
         SizeChanged += (_, _) => UpdateLayoutMode();
         StateChanged += (_, _) => UpdateAnimating();
@@ -54,7 +69,9 @@ public partial class LyricsWindow : Window
             app.TrackChanged -= OnTrack;
             app.Media.Changed -= OnMediaChanged;
             _tick.Stop();
-            Page.SetAnimating(false);
+            _saveSoon.Stop();
+            Page.StopAll();
+            foreach (var c in _drift) c.Controller?.Stop();
             SaveBounds();
         };
         KeyDown += OnKey;
@@ -94,6 +111,51 @@ public partial class LyricsWindow : Window
         bool black = _app.Settings.LyricsBackground == LyricsBackground.Black;
         BlackBg.Visibility = black ? Visibility.Visible : Visibility.Collapsed;
         BackdropHost.Visibility = black ? Visibility.Collapsed : Visibility.Visible;
+        UpdateAnimating();
+    }
+
+    void Drift(Animatable target, DependencyProperty dp, DoubleAnimation a)
+    {
+        a.AutoReverse = true; a.RepeatBehavior = RepeatBehavior.Forever; a.EasingFunction = new SineEase();
+        Timeline.SetDesiredFrameRate(a, 20);
+        var clock = a.CreateClock();
+        target.ApplyAnimationClock(dp, clock);
+        _drift.Add(clock);
+    }
+
+    void SaveSoon() { _saveSoon.Stop(); _saveSoon.Start(); }
+
+    void SetFont(double size) { Page.FontSize = size; SaveSoon(); }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr mon, ref MonitorInfo info);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RectPx r);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)] struct RectPx { public int L, T, R, B; }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct MonitorInfo { public int Size; public RectPx Monitor, Work; public uint Flags; }
+
+    // A saved place on a monitor that is gone (or between monitors of different heights) would open off
+    // screen, and a size from a big monitor would hang off a small one.
+    void FitToMonitor()
+    {
+        if (WindowState == WindowState.Maximized) return;   // Windows maximizes it onto a real monitor itself
+        try
+        {
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            var mon = MonitorFromWindow(hwnd, 0 /* NULL */);
+            bool offScreen = mon == IntPtr.Zero;
+            if (offScreen) mon = MonitorFromWindow(hwnd, 2 /* NEAREST */);
+            var mi = new MonitorInfo { Size = System.Runtime.InteropServices.Marshal.SizeOf<MonitorInfo>() };
+            if (!GetMonitorInfo(mon, ref mi) || !GetWindowRect(hwnd, out var r)) return;
+            var w = mi.Work;
+            int ww = Math.Min(r.R - r.L, w.R - w.L), wh = Math.Min(r.B - r.T, w.B - w.T);
+            int x = offScreen ? w.L + (w.R - w.L - ww) / 2 : Math.Clamp(r.L, w.L, w.R - ww);
+            int y = offScreen ? w.T + (w.B - w.T - wh) / 2 : Math.Clamp(r.T, w.T, w.B - wh);
+            if (x != r.L || y != r.T || ww != r.R - r.L || wh != r.B - r.T)
+                SetWindowPos(hwnd, IntPtr.Zero, x, y, ww, wh, 0x0004 /* NOZORDER */ | 0x0010 /* NOACTIVATE */);
+        }
+        catch (Exception ex) { Log.Error("lyrics window place", ex); }
     }
 
     void Gear_Click(object sender, RoutedEventArgs e) => TogglePanel();
@@ -112,7 +174,6 @@ public partial class LyricsWindow : Window
         else SettingsPanel.Visibility = Visibility.Collapsed;
     }
 
-    /// <summary>Changes a setting the way the Settings window does (saved, applied everywhere).</summary>
     void Change(Action<AppSettings> edit, bool lyrics = false)
     {
         var c = _app.Settings.Copy();
@@ -143,7 +204,7 @@ public partial class LyricsWindow : Window
 
         Group("Text size");
         var size = new Slider { Minimum = 22, Maximum = 90, Value = Page.FontSize, Margin = new Thickness(0, 2, 0, 4) };
-        size.ValueChanged += (_, e) => Page.FontSize = e.NewValue;
+        size.ValueChanged += (_, e) => SetFont(e.NewValue);
         PanelBody.Children.Add(size);
 
         Group("Timing for this song");
@@ -158,8 +219,8 @@ public partial class LyricsWindow : Window
         PanelBody.Children.Add(row);
 
         Group("Window");
-        Toggle("Keep on top", Topmost, v => { Topmost = v; PinBtn.Opacity = v ? 1 : 0.6; s.LyricsAlwaysOnTop = v; _app.SaveSettings(); });
-        Toggle("Show the player", !_panelHidden, v => { _panelHidden = !v; s.LyricsPanelHidden = _panelHidden; UpdateLayoutMode(); _app.SaveSettings(); });
+        Toggle("Keep on top", Topmost, v => { Topmost = v; PinBtn.Opacity = v ? 1 : 0.6; _app.Settings.LyricsAlwaysOnTop = v; _app.SaveSettings(); });
+        Toggle("Show the player", !_panelHidden, v => { _panelHidden = !v; _app.Settings.LyricsPanelHidden = _panelHidden; UpdateLayoutMode(); _app.SaveSettings(); });
         Toggle("Hide buttons while watching", s.LyricsAutoHideTools, v => Change(c => c.LyricsAutoHideTools = v));
         Toggle("Hide the desktop strip while open", s.HideStripWithLyricsWindow, v => Change(c => c.HideStripWithLyricsWindow = v));
 
@@ -236,7 +297,17 @@ public partial class LyricsWindow : Window
     void UpdateAnimating()
     {
         bool visible = WindowState != WindowState.Minimized && IsVisible;
-        Page.SetAnimating(visible && _app.NowPlaying is { Playing: true });
+        bool playing = _app.NowPlaying is { Playing: true };
+        Page.SetAnimating(visible && playing);
+        if (!visible) Page.StopAll();
+        // The drifting backdrop redraws the whole window.
+        bool drift = visible && playing && _app.Settings.LyricsBackground != LyricsBackground.Black;
+        foreach (var c in _drift)
+        {
+            if (c.Controller == null) continue;
+            if (drift && c.IsPaused) c.Controller.Resume();
+            else if (!drift && !c.IsPaused) c.Controller.Pause();
+        }
         Page.InvalidateVisual();
         PlayBtn.Content = _app.NowPlaying is { Playing: true } ? "" : "";
     }
@@ -255,7 +326,6 @@ public partial class LyricsWindow : Window
 
     static string Clock(long ms) { var t = TimeSpan.FromMilliseconds(Math.Max(0, ms)); return t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"m\:ss"); }
 
-    /// <summary>Narrow: lyrics alone. Wide: the player beside them.</summary>
     void UpdateLayoutMode()
     {
         bool narrow = ActualWidth < 900 || _panelHidden;
@@ -268,10 +338,11 @@ public partial class LyricsWindow : Window
         ((FrameworkElement)ElapsedText.Parent).Width = size;
     }
 
-    void SaveBounds()
+    internal void SaveBounds()
     {
         var s = _app.Settings;
-        s.LyricsMaximized = WindowState == WindowState.Maximized;
+        // Minimized keeps whatever it was before, so a maximized window comes back maximized.
+        if (WindowState != WindowState.Minimized) s.LyricsMaximized = WindowState == WindowState.Maximized;
         var b = RestoreBounds;
         if (!b.IsEmpty) { s.LyricsLeft = b.Left; s.LyricsTop = b.Top; s.LyricsWidth = b.Width; s.LyricsHeight = b.Height; }
         s.LyricsFontSize = Page.FontSize;
@@ -289,8 +360,8 @@ public partial class LyricsWindow : Window
                 break;
             case Key.S when Keyboard.Modifiers == ModifierKeys.None: TogglePanel(); e.Handled = true; break;
             case Key.F11: WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized; break;
-            case Key.OemPlus or Key.Add when Keyboard.Modifiers == ModifierKeys.Control: Page.FontSize += 2; break;
-            case Key.OemMinus or Key.Subtract when Keyboard.Modifiers == ModifierKeys.Control: Page.FontSize -= 2; break;
+            case Key.OemPlus or Key.Add when Keyboard.Modifiers == ModifierKeys.Control: SetFont(Page.FontSize + 2); break;
+            case Key.OemMinus or Key.Subtract when Keyboard.Modifiers == ModifierKeys.Control: SetFont(Page.FontSize - 2); break;
         }
     }
 
@@ -305,8 +376,8 @@ public partial class LyricsWindow : Window
     void Prev_Click(object sender, RoutedEventArgs e) => _ = _app.Media.SkipAsync(false);
     void Next_Click(object sender, RoutedEventArgs e) => _ = _app.Media.SkipAsync(true);
     void Play_Click(object sender, RoutedEventArgs e) => _ = _app.Media.TogglePlayAsync();
-    void Smaller_Click(object sender, RoutedEventArgs e) => Page.FontSize -= 3;
-    void Bigger_Click(object sender, RoutedEventArgs e) => Page.FontSize += 3;
+    void Smaller_Click(object sender, RoutedEventArgs e) => SetFont(Page.FontSize - 3);
+    void Bigger_Click(object sender, RoutedEventArgs e) => SetFont(Page.FontSize + 3);
     void Copy_Click(object sender, RoutedEventArgs e)
     {
         var lines = _app.CurrentResult?.Lines;

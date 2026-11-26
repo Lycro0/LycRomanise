@@ -2,8 +2,7 @@ using System.Text;
 
 namespace LycRomanise.Romanize;
 
-/// <summary>Korean → Revised Romanization with the pronunciation rules between syllables (liaison,
-/// nasalization, ㄹ assimilation, ㅎ aspiration, palatalization). Ported from v1.8.1.</summary>
+// Revised Romanization with the sound changes between syllables (liaison, nasalization, ㄹ assimilation, ㅎ aspiration, palatalization).
 public static class Korean
 {
     static readonly string[] Cho = { "g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h" };
@@ -12,7 +11,7 @@ public static class Korean
     {
         ("", null, null), ("k", null, 0), ("k", null, 1), ("k", "k", 9), ("n", null, 2), ("n", "n", 12), ("n", "n", null),
         ("t", null, 3), ("l", null, 5), ("k", "l", 0), ("m", "l", 6), ("l", "l", 7), ("l", "l", 9), ("l", "l", 16),
-        ("p", "l", 17), ("l", "l", null), ("m", null, 6), ("p", null, 7), ("p", "p", 9), ("t", null, 9), ("t", null, 10),
+        ("p", "l", 17), ("l", null, 5),("m", null, 6), ("p", null, 7), ("p", "p", 9), ("t", null, 9), ("t", null, 10),
         ("ng", "ng", null), ("t", null, 12), ("t", null, 14), ("k", null, 15), ("t", null, 16), ("p", null, 17), ("t", null, null),
     };
     static readonly HashSet<int> KTails = new() { 1, 2, 3, 9, 24 };
@@ -26,6 +25,9 @@ public static class Korean
         ['ㅎ'] = "h", ['ㅏ'] = "a", ['ㅐ'] = "ae", ['ㅑ'] = "ya", ['ㅒ'] = "yae", ['ㅓ'] = "eo", ['ㅔ'] = "e", ['ㅕ'] = "yeo", ['ㅖ'] = "ye",
         ['ㅗ'] = "o", ['ㅘ'] = "wa", ['ㅙ'] = "wae", ['ㅚ'] = "oe", ['ㅛ'] = "yo", ['ㅜ'] = "u", ['ㅝ'] = "wo", ['ㅞ'] = "we", ['ㅟ'] = "wi",
         ['ㅠ'] = "yu", ['ㅡ'] = "eu", ['ㅢ'] = "ui", ['ㅣ'] = "i",
+        // Compound finals typed on their own (slang like ㄳ, ㅄ) so no Hangul is left in the output.
+        ['ㄳ'] = "gs", ['ㄵ'] = "nj", ['ㄶ'] = "nh", ['ㄺ'] = "lg", ['ㄻ'] = "lm", ['ㄼ'] = "lb",
+        ['ㄽ'] = "ls", ['ㄾ'] = "lt", ['ㄿ'] = "lp", ['ㅀ'] = "lh", ['ㅄ'] = "bs",
     };
 
     sealed class Syl { public int Lead, Vowel, Tail; public string? LeadS, TailS; }
@@ -53,6 +55,15 @@ public static class Korean
             }
             if (t == 27 && lead == 9) { b.Lead = 10; a.Tail = 0; continue; }
             if (t == 27 && (lead == 2 || lead == 6)) { a.Tail = 4; t = 4; }
+            if (lead == 18)
+            {
+                // Double finals before ㅎ keep their first consonant and aspirate the second.
+                if (t == 9) { a.Tail = 8; b.Lead = 15; continue; }              // ㄺ: 밝히다 balkida
+                if (t is 11 or 14) { a.Tail = 8; b.Lead = 17; continue; }       // ㄼ/ㄿ: 넓히다 neolpida
+                if (t == 13) { a.Tail = 8; b.Lead = 16; continue; }             // ㄾ
+                if (t == 18) { a.Tail = 0; b.Lead = 17; continue; }             // ㅄ: 값하다 gapada
+                if (t == 5) { a.Tail = 4; b.Lead = 14; continue; }              // ㄵ: 앉히다 anchida
+            }
             if (lead == 18 && (KTails.Contains(t) || TTails.Contains(t) || PTails.Contains(t)))
             {
                 if (t is 1 or 24 or 2 or 3) { b.Lead = 15; a.Tail = 0; }
@@ -85,6 +96,8 @@ public static class Korean
 
     public static string Romanize(string text)
     {
+        // Compose decomposed (NFD) jamo into syllables; FormC keeps compatibility jamo intact.
+        try { text = text.Normalize(NormalizationForm.FormC); } catch (ArgumentException) { }
         var sb = new StringBuilder();
         int i = 0, n = text.Length;
         while (i < n)

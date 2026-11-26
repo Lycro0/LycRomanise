@@ -1,12 +1,11 @@
 namespace LycRomanise.Core;
 
-/// <summary>One timed piece of a line: a word, or a syllable of an unspaced script.</summary>
 public sealed class LyricWord
 {
     public string Text { get; set; } = "";
     public long Start { get; set; }        // ms
     public long End { get; set; }          // ms
-    /// <summary>Runs on from the word before with no space between (a syllable of the same word).</summary>
+    // No space before this piece: a syllable of the same word.
     public bool Joined { get; set; }
 
     public LyricWord Clone() => new() { Text = Text, Start = Start, End = End, Joined = Joined };
@@ -19,15 +18,13 @@ public sealed class LyricLine
     public List<LyricWord> Words { get; set; } = new();
     public long Start { get; set; }
     public long End { get; set; }
-    /// <summary>TTML agent ("v1", "v2"): a second voice in a duet.</summary>
+    // TTML agent ("v1", "v2").
     public string? Voice { get; set; }
     public LineAlign Align { get; set; } = LineAlign.Leading;
-    /// <summary>Backing vocals sung under the line.</summary>
     public LyricLine? Backing { get; set; }
-    /// <summary>How it sounds in Latin letters, from the source (timed where it can be).</summary>
     public LyricLine? Pronunciation { get; set; }
     public string? Translation { get; set; }
-    /// <summary>The words are estimated across the line rather than timed by the source.</summary>
+    // Word times were estimated, not given by the source.
     public bool Estimated { get; set; }
 
     public string Text => LineText(this);
@@ -78,18 +75,15 @@ public sealed class LyricsResult
     public bool HasLines => Lines.Count > 0;
 }
 
-/// <summary>What is known about the playing track when a source is asked.</summary>
 public sealed class TrackQuery
 {
     public string Title { get; set; } = "";
     public string Artist { get; set; } = "";
     public string Album { get; set; } = "";
     public int Seconds { get; set; }
-    /// <summary>Spotify's base62 id, when the matcher found one.</summary>
     public string? SpotifyId { get; set; }
     public string? Isrc { get; set; }
     public string? MusixmatchCommontrack { get; set; }
 
-    /// <summary>A stable key for caches and per-song settings.</summary>
     public string Key => Normalize.SongKey(Artist, Title);
 }

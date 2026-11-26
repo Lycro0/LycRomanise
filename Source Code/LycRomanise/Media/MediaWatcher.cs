@@ -7,7 +7,6 @@ public sealed record MediaState(
     string AppId, string Title, string Artist, string Album, long DurationMs,
     long PositionMs, DateTime PositionAt, bool Playing, double Rate)
 {
-    /// <summary>The position now, carried forward from when the player last reported it.</summary>
     public long PositionNow()
     {
         if (!Playing) return PositionMs;
@@ -19,8 +18,6 @@ public sealed record MediaState(
     public string TrackKey => $"{Artist}\u0001{Title}\u0001{Album}";
 }
 
-/// <summary>Reads what is playing from Windows' media controls (SMTC): Spotify, Apple Music, iTunes,
-/// Spotifast and any other player that reports to Windows.</summary>
 public sealed class MediaWatcher : IDisposable
 {
     static readonly string[] MusicApps =
@@ -37,7 +34,12 @@ public sealed class MediaWatcher : IDisposable
     GlobalSystemMediaTransportControlsSession? _session;
     long _lastReportedPos = -1;
     DateTime _lastTimelineAt;
-    int _busy, _failures;
+    DateTime _playingSince;
+    bool _wasPlaying;
+    long _lastPausedPos = -1;
+    int _busy, _again, _failures;
+    GlobalSystemMediaTransportControlsSession? _subscribed;
+    volatile bool _sessionsChanged;
 
     public event Action<MediaState?>? Changed;
     public MediaState? Current => _last;
@@ -53,7 +55,7 @@ public sealed class MediaWatcher : IDisposable
         try
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-            _manager.SessionsChanged += (_, _) => _ = PollAsync();
+            _manager.SessionsChanged += (_, _) => { _sessionsChanged = true; _ = PollAsync(); };
             _manager.CurrentSessionChanged += (_, _) => _ = PollAsync();
         }
         catch (Exception ex) { Log.Error("media manager", ex); }
@@ -69,7 +71,8 @@ public sealed class MediaWatcher : IDisposable
 
     async Task PollAsync()
     {
-        if (Interlocked.Exchange(ref _busy, 1) == 1) return;
+        // A trigger during a poll is not dropped: one more poll runs right after (an event may carry the news).
+        if (Interlocked.Exchange(ref _busy, 1) == 1) { Interlocked.Exchange(ref _again, 1); return; }
         try
         {
             var state = await ReadAsync();
@@ -88,24 +91,60 @@ public sealed class MediaWatcher : IDisposable
             // A player that keeps failing (closing, hung) is treated as stopped, so the strip doesn't stay up.
             if (++_failures == 3 && _last != null) { _last = null; Changed?.Invoke(null); }
         }
-        finally { Interlocked.Exchange(ref _busy, 0); }
+        finally
+        {
+            Interlocked.Exchange(ref _busy, 0);
+            if (Interlocked.Exchange(ref _again, 0) == 1) _ = PollAsync();
+        }
+    }
+
+    void OnSessionEvent(GlobalSystemMediaTransportControlsSession s, object e) => _ = PollAsync();
+
+    // Session events poll at once so resumes and seeks are not up to 400 ms late; the timer is only a fallback.
+    void Follow(GlobalSystemMediaTransportControlsSession? session)
+    {
+        // Same player as before: keep its handlers (the projection may hand out a new wrapper each poll).
+        if (ReferenceEquals(session, _subscribed) || (session != null && _subscribed != null && !_sessionsChanged
+            && session.SourceAppUserModelId == _subscribed.SourceAppUserModelId)) return;
+        _sessionsChanged = false;
+        try
+        {
+            if (_subscribed != null)
+            {
+                _subscribed.MediaPropertiesChanged -= OnSessionEvent;
+                _subscribed.TimelinePropertiesChanged -= OnSessionEvent;
+                _subscribed.PlaybackInfoChanged -= OnSessionEvent;
+            }
+        }
+        catch { }   // a player that closed
+        _subscribed = null;
+        if (session == null) return;
+        try
+        {
+            session.MediaPropertiesChanged += OnSessionEvent;
+            session.TimelinePropertiesChanged += OnSessionEvent;
+            session.PlaybackInfoChanged += OnSessionEvent;
+            _subscribed = session;
+        }
+        catch (Exception ex) { Log.Error("media events", ex); }
     }
 
     async Task<MediaState?> ReadAsync()
     {
         if (_manager == null) return null;
         var sessions = _manager.GetSessions().Where(s => Accept(s.SourceAppUserModelId ?? "")).ToList();
-        if (sessions.Count == 0) return null;
-        // Whichever is playing wins; else the system's current one; else the first.
+        if (sessions.Count == 0) { Follow(null); return null; }
         var current = _manager.GetCurrentSession();
         var session = sessions.FirstOrDefault(s => s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                       ?? sessions.FirstOrDefault(s => current != null && s.SourceAppUserModelId == current.SourceAppUserModelId)
                       ?? sessions[0];
         _session = session;
+        Follow(session);
         var props = await session.TryGetMediaPropertiesAsync();
         if (props == null || string.IsNullOrWhiteSpace(props.Title)) return null;
         var info = session.GetPlaybackInfo();
         var tl = session.GetTimelineProperties();
+        if (tl == null) return null;
         bool playing = info?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
         double rate = info?.PlaybackRate ?? 1;
 
@@ -113,7 +152,6 @@ public sealed class MediaWatcher : IDisposable
         DateTime at = tl.LastUpdatedTime.UtcDateTime;
         long duration = (long)(tl.EndTime - tl.StartTime).TotalMilliseconds;
         if (at.Year < 2000) at = DateTime.UtcNow;
-        // Players report the timeline only now and then; between reports the position is carried forward.
         if (reported != _lastReportedPos || at != _lastTimelineAt)
         {
             _lastReportedPos = reported;
@@ -121,13 +159,18 @@ public sealed class MediaWatcher : IDisposable
         }
         // Some players (Apple Music) leave LastUpdatedTime in the past without moving the position on pause.
         if (!playing) at = DateTime.UtcNow;
+        // On resume Spotify briefly keeps the paused report; counted from the pause the lyrics would race ahead.
+        if (playing && !_wasPlaying) _playingSince = DateTime.UtcNow;
+        _wasPlaying = playing;
+        if (playing && at < _playingSince && reported == _lastPausedPos) at = _playingSince;
+        if (!playing) _lastPausedPos = reported;
 
         var artist = props.Artist ?? "";
         var album = props.AlbumTitle ?? "";
-        // Apple Music puts "Artist - Album" in the artist field, joined with an em dash (U+2014), so look for that character.
+        // Apple Music puts "Artist U+2014 Album" in the artist field.
         string AppleJoin = " " + (char)0x2014 + " ";
         int dash = artist.IndexOf(AppleJoin, StringComparison.Ordinal);
-        if (dash > 0 && session.SourceAppUserModelId.Contains("Apple", StringComparison.OrdinalIgnoreCase))
+        if (dash > 0 && (session.SourceAppUserModelId ?? "").Contains("Apple", StringComparison.OrdinalIgnoreCase))
         {
             if (album.Length == 0) album = artist[(dash + 3)..];
             artist = artist[..dash];
@@ -136,7 +179,6 @@ public sealed class MediaWatcher : IDisposable
             duration, reported, at, playing, rate);
     }
 
-    /// <summary>Is this an ad or a Spotify DJ voice-over rather than a song?</summary>
     public static bool IsAdOrDj(MediaState s)
     {
         if (s.Artist.Length == 0 && (s.Title is "Advertisement" or "Spotify" or "Spotify Free")) return true;
@@ -144,7 +186,6 @@ public sealed class MediaWatcher : IDisposable
         return s.DurationMs is > 0 and < 31000 && s.Artist.Length == 0;
     }
 
-    /// <summary>Jumps the player to a position; players that do not allow it ignore the request.</summary>
     public async Task<bool> SeekAsync(long ms)
     {
         var s = _session;
@@ -168,7 +209,6 @@ public sealed class MediaWatcher : IDisposable
         try { if (_session != null) { if (next) await _session.TrySkipNextAsync(); else await _session.TrySkipPreviousAsync(); } } catch { }
     }
 
-    /// <summary>The cover the player reports for what is playing, as image bytes; null when it has none.</summary>
     public async Task<byte[]?> ThumbnailAsync()
     {
         try
@@ -186,5 +226,9 @@ public sealed class MediaWatcher : IDisposable
         catch (Exception ex) { Log.Error("thumbnail", ex); return null; }
     }
 
-    public void Dispose() => _timer.Dispose();
+    public void Dispose()
+    {
+        _timer.Dispose();
+        Follow(null);
+    }
 }

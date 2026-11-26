@@ -3,7 +3,6 @@ using System.Text;
 
 namespace LycRomanise.Romanize;
 
-/// <summary>Cyrillic, Greek, Arabic-script, Hebrew and Devanagari, rule based. Ported from v1.8.1.</summary>
 public static class Others
 {
     static string Cased(char src, string outp) => outp.Length > 0 && char.IsUpper(src) ? char.ToUpperInvariant(outp[0]) + outp[1..] : outp;
@@ -22,7 +21,7 @@ public static class Others
         if (sb.Length > 0) yield return (mode ?? false, sb.ToString());
     }
 
-    // ----------------------------------------------------------------- Cyrillic
+    // Cyrillic
     static readonly Dictionary<char, string> Cyr = new()
     {
         ['а'] = "a", ['б'] = "b", ['в'] = "v", ['г'] = "g", ['д'] = "d", ['е'] = "e", ['ё'] = "yo", ['ж'] = "zh", ['з'] = "z",
@@ -40,7 +39,7 @@ public static class Others
         return sb.ToString();
     }
 
-    // -------------------------------------------------------------------- Greek
+    // Greek
     static readonly Dictionary<char, string> Gr = new()
     {
         ['α'] = "a", ['β'] = "v", ['γ'] = "g", ['δ'] = "d", ['ε'] = "e", ['ζ'] = "z", ['η'] = "i", ['θ'] = "th", ['ι'] = "i",
@@ -89,7 +88,7 @@ public static class Others
         return o.ToString();
     }
 
-    // ----------------------------------------------------------- vowel guessing
+    // Vowel guessing
     static string FillVowels(List<(char kind, string text)> tokens)
     {
         var sb = new StringBuilder();
@@ -107,7 +106,7 @@ public static class Others
         return sb.ToString();
     }
 
-    // ------------------------------------------------------------------- Arabic
+    // Arabic
     static readonly Dictionary<char, string> ArCons = new()
     {
         ['ب'] = "b", ['ت'] = "t", ['ث'] = "th", ['ج'] = "j", ['ح'] = "h", ['خ'] = "kh", ['د'] = "d", ['ذ'] = "dh", ['ر'] = "r",
@@ -162,7 +161,7 @@ public static class Others
     public static string Arabic(string text) =>
         string.Concat(SplitWords(text, IsArabicLetter).Select(p => p.word ? ArabicWord(p.chunk) : p.chunk));
 
-    // ------------------------------------------------------------------- Hebrew
+    // Hebrew
     static readonly Dictionary<char, string> HeCons = new()
     {
         ['א'] = "", ['ב'] = "v", ['ג'] = "g", ['ד'] = "d", ['ה'] = "h", ['ז'] = "z", ['ח'] = "kh", ['ט'] = "t", ['י'] = "y",
@@ -223,7 +222,7 @@ public static class Others
     public static string Hebrew(string text) =>
         string.Concat(SplitWords(text, IsHebrewLetter).Select(p => p.word ? HebrewWord(p.chunk) : p.chunk));
 
-    // --------------------------------------------------------------- Devanagari
+    // Devanagari
     static readonly Dictionary<char, string> DevCons = new()
     {
         ['क'] = "k", ['ख'] = "kh", ['ग'] = "g", ['घ'] = "gh", ['ङ'] = "ng", ['च'] = "ch", ['छ'] = "chh", ['ज'] = "j", ['झ'] = "jh",

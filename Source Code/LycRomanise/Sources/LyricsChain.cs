@@ -6,8 +6,7 @@ using LycRomanise.Core;
 
 namespace LycRomanise.Sources;
 
-/// <summary>Asks the sources in the user's order and keeps the best answer: word timing beats line
-/// timing beats plain text. With "prefer word sync" off, the first synced answer wins.</summary>
+// Word timing beats line timing beats plain text; with PreferWordSync off the first synced answer wins.
 public sealed class LyricsChain
 {
     readonly Func<AppSettings> _get;
@@ -35,8 +34,7 @@ public sealed class LyricsChain
         ForgetLooseNetEaseMatches();
     }
 
-    /// <summary>Before 2.2, NetEase matched on artist and length only and could cache another song's lyrics.
-    /// Drop its cached answers once so those songs are looked up again.</summary>
+    // NetEase once matched on artist and length only and could cache another song's lyrics; drop its entries once.
     static void ForgetLooseNetEaseMatches()
     {
         var marker = Path.Combine(Paths.Cache, ".netease-title-check");
@@ -77,7 +75,6 @@ public sealed class LyricsChain
             if (!File.Exists(path)) return null;
             var e = JsonSerializer.Deserialize<CacheEntry>(File.ReadAllText(path), CacheJson);
             if (e == null || e.Version != CacheVersion || e.Order != OrderSignature()) return null;
-            // A miss is remembered for a day, a hit for a month.
             var age = DateTime.UtcNow - e.At;
             if (e.Result == null ? age > TimeSpan.FromDays(1) : age > TimeSpan.FromDays(30)) return null;
             return e.Result ?? new LyricsResult { SourceKey = "", Provider = "" };
@@ -120,17 +117,18 @@ public sealed class LyricsChain
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             Log.Info($"{source.Key}: timed out");
+            Http.MarkDegraded();
             return null;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             Log.Error(source.Key, ex);
+            Http.MarkDegraded();
             return null;
         }
     }
 
-    /// <summary>The lyrics for the track. Calls progress with each source as it is asked.</summary>
     public async Task<LyricsResult?> FetchAsync(TrackQuery q, Action<string>? progress, CancellationToken ct, bool useCache = true)
     {
         if (useCache && FromCache(q) is { } cached)
@@ -141,6 +139,9 @@ public sealed class LyricsChain
             if (Imported.Find(q) == null) return null;
         }
 
+        // Flows into every request below; a source that could not answer marks it.
+        var degraded = new System.Runtime.CompilerServices.StrongBox<bool>();
+        Http.Degraded.Value = degraded;
         progress?.Invoke("Identifying track…");
         await Musixmatch.Identify(q, ct);
         Log.Info($"track: {q.Artist} - {q.Title} ({q.Seconds}s) spotify={q.SpotifyId ?? "-"} isrc={q.Isrc ?? "-"}");
@@ -159,17 +160,17 @@ public sealed class LyricsChain
             progress?.Invoke($"Asking {source.Name}…");
             var r = await AskOne(source, q, ct);
             if (r == null || (!r.HasLines && !r.Instrumental)) continue;
-            if (r.Instrumental) { best ??= r; continue; }
+            if (r.Instrumental) { best ??= r; continue; }   // only counts when nobody had words
             if (Rank(r) > Rank(best)) best = r;
             if (best!.Timing == Timing.Word) break;
             if (best.Timing == Timing.Line && !_settings.PreferWordSync) break;
         }
-        // Instrumental only counts when nobody had words.
-        ToCache(q, best);
+        // With a source unreachable a miss or lesser result is not final; word sync cannot be beaten, so it is kept.
+        if (!degraded.Value || best?.Timing == Timing.Word) ToCache(q, best);
+        else Log.Info("cache: not saved, a source could not answer");
         return best;
     }
 
-    /// <summary>Every enabled source's answer, asked at once, for the "choose lyrics" picker.</summary>
     public async Task<List<LyricsResult>> FetchAllAsync(TrackQuery q, CancellationToken ct)
     {
         await Musixmatch.Identify(q, ct);

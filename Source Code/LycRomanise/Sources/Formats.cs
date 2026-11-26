@@ -6,8 +6,6 @@ using LycRomanise.Core;
 
 namespace LycRomanise.Sources;
 
-/// <summary>The lyric file formats the sources answer in: LRC (and enhanced LRC with word stamps),
-/// Apple's TTML, and NetEase yrc / KuGou krc.</summary>
 public static partial class Formats
 {
     // ------------------------------------------------------------------ LRC
@@ -26,8 +24,7 @@ public static partial class Formats
         return (minutes * 60 + seconds) * 1000 + fraction;
     }
 
-    /// <summary>Timed LRC as lines; enhanced LRC word stamps (&lt;mm:ss.xx&gt;) give word timing.
-    /// null when no line is timed.</summary>
+    // Enhanced LRC word stamps (<mm:ss.xx>) give word timing; null when no line is timed.
     public static List<LyricLine>? ParseLrc(string? lrc)
     {
         if (string.IsNullOrWhiteSpace(lrc)) return null;
@@ -52,7 +49,8 @@ public static partial class Formats
             foreach (var ms in at) stamped.Add((ms - offset, text));
         }
         if (stamped.Count == 0) return null;
-        stamped.Sort((a, b) => a.ms.CompareTo(b.ms));
+        // Stable, so rows sharing a stamp (original then translation) keep the file's order.
+        stamped = stamped.OrderBy(s => s.ms).ToList();
 
         var starts = stamped.Select(s => s.ms).ToList();
         var lines = new List<LyricLine>();
@@ -60,7 +58,7 @@ public static partial class Formats
         if (!anyWordStamps)
         {
             // Some files write each line twice at the same time: the original and its romanization.
-            var merged = new List<(long ms, string text, string? pron)>();
+            var merged = new List<(long ms, string text, string? pron, string? trans)>();
             foreach (var (ms, text) in stamped)
             {
                 if (merged.Count > 0 && merged[^1].ms == ms && text.Length > 0 && merged[^1].text.Length > 0)
@@ -69,30 +67,46 @@ public static partial class Formats
                     bool prevLatin = !Romanize.Romanizer.Needs(prev.text), curLatin = !Romanize.Romanizer.Needs(text);
                     if (prevLatin != curLatin && prev.pron == null)
                     {
-                        merged[^1] = prevLatin ? (ms, text, prev.text) : (ms, prev.text, text);
+                        merged[^1] = prevLatin ? (ms, text, prev.text, prev.trans) : (ms, prev.text, text, prev.trans);
                         continue;
                     }
+                    // Any other row at the same time is a translation; as its own line it would never be current.
+                    if (Karaoke.BareText(text) != Karaoke.BareText(prev.text) && prev.trans == null) merged[^1] = prev with { trans = text };
+                    continue;
                 }
-                merged.Add((ms, text, null));
+                merged.Add((ms, text, null, null));
             }
             var est = Karaoke.EstimatedLines(merged.Select(m => m.ms).ToList(), merged.Select(m => m.text).ToList());
             // EstimatedLines skips empty rows; pair the rest back up with their romanization.
             var withText = merged.Where(m => m.text.Trim().Length > 0 && m.text.Trim() != "♪").ToList();
             for (int i = 0; i < est.Count && i < withText.Count; i++)
+            {
                 if (withText[i].pron != null) est[i].Pronunciation = Karaoke.Pronunciation(null, withText[i].pron, est[i]);
+                if (withText[i].trans != null) est[i].Translation = withText[i].trans;
+            }
             return est.Count > 0 ? est : null;
         }
 
         for (int i = 0; i < stamped.Count; i++)
         {
             var (ms, text) = stamped[i];
-            long next = i + 1 < stamped.Count ? stamped[i + 1].ms : ms + 5000;
+            // The next later stamp: a row at the same time would give this line no length at all.
+            long next = ms + 5000;
+            for (int j = i + 1; j < stamped.Count; j++) if (stamped[j].ms > ms) { next = stamped[j].ms; break; }
             var marks = LrcWordStamp().Matches(text);
             if (marks.Count == 0)
             {
                 var plain = text.Trim();
-                if (plain.Length == 0) continue;
-                var est = Karaoke.SpreadWords(plain, ms, next);
+                if (plain.Length == 0 || plain == "♪") continue;   // the stamp still ends the row before
+                // A second row at a line's time is its translation, not a line of its own.
+                if (lines.Count > 0 && lines[^1].Start == ms)
+                {
+                    if (lines[^1].Translation == null && Karaoke.BareText(plain) != Karaoke.BareText(lines[^1].Text)) lines[^1].Translation = plain;
+                    continue;
+                }
+                // Capped like EstimatedLines: a long gap after a line is a pause, not a slow sweep.
+                long pEnd = Math.Min(next, ms + Math.Max(2500, plain.Length * 400L));
+                var est = Karaoke.SpreadWords(plain, ms, pEnd);
                 est.Estimated = true;
                 lines.Add(est);
                 continue;
@@ -105,7 +119,14 @@ public static partial class Formats
             {
                 int from = pos, to = k < marks.Count ? marks[k].Index : text.Length;
                 var seg = text[from..to];
-                long segStart = cursor, segEnd = k < marks.Count ? StampMs(marks[k]) - offset : next;
+                long segStart = cursor, segEnd;
+                if (k < marks.Count) segEnd = StampMs(marks[k]) - offset;
+                else
+                {
+                    // No closing stamp: the last word is sung for about its length, not until the next line.
+                    int tl = seg.Trim().Length;
+                    segEnd = tl == 0 ? next : Math.Max(segStart, Math.Min(next, segStart + Math.Max(600, tl * 400L)));
+                }
                 AddSegment(line, seg, segStart, segEnd, ref spaced);
                 if (k < marks.Count) { cursor = StampMs(marks[k]) - offset; pos = marks[k].Index + marks[k].Length; }
             }
@@ -138,8 +159,7 @@ public static partial class Formats
     [GeneratedRegex(@"\((\d+),(\d+),-?\d+\)")] private static partial Regex YrcPiece();
     [GeneratedRegex(@"<(\d+),(\d+),-?\d+>")] private static partial Regex KrcPiece();
 
-    /// <summary>NetEase yrc ("[start,len](t,d,0)word") or KuGou krc ("[start,len]&lt;t,d,0&gt;word", times
-    /// from the line's start) as word timed lines.</summary>
+    // yrc "[start,len](t,d,0)word" or krc "[start,len]<t,d,0>word", whose piece times count from the line start.
     public static List<LyricLine>? ParsePieces(string? body, bool krc)
     {
         if (string.IsNullOrEmpty(body)) return null;
@@ -150,7 +170,8 @@ public static partial class Formats
             var row = raw.TrimEnd('\r');
             var head = PieceHeader().Match(row);
             if (!head.Success) continue;
-            long lineStart = long.Parse(head.Groups[1].Value), lineLen = long.Parse(head.Groups[2].Value);
+            // A number too big for a long is a broken row, not a reason to lose the whole file.
+            if (!long.TryParse(head.Groups[1].Value, out var lineStart) || !long.TryParse(head.Groups[2].Value, out var lineLen)) continue;
             var pieces = pieceRx.Matches(row, head.Length);
             var words = new List<LyricWord>();
             LyricWord? open = null;
@@ -160,8 +181,9 @@ public static partial class Formats
                 int from = pieces[i].Index + pieces[i].Length, to = i + 1 < pieces.Count ? pieces[i + 1].Index : row.Length;
                 var rawText = row[from..to];
                 var text = rawText.Trim();
-                long start = long.Parse(pieces[i].Groups[1].Value) + (krc ? lineStart : 0);
-                long end = start + Math.Max(long.Parse(pieces[i].Groups[2].Value), 1);
+                if (!long.TryParse(pieces[i].Groups[1].Value, out var ps) || !long.TryParse(pieces[i].Groups[2].Value, out var pd)) continue;
+                long start = ps + (krc ? lineStart : 0);
+                long end = start + Math.Max(pd, 1);
                 bool unspaced = Karaoke.UnspacedScript(text);
                 if (text.Length > 0 && open != null && !unspaced)
                 {
@@ -184,7 +206,7 @@ public static partial class Formats
     }
 
     // ------------------------------------------------------------------ TTML
-    /// <summary>A begin/end clock: "1.241", "0:01.241", "1:02:03.456", "1.5s", "500ms". -1 when unreadable.</summary>
+    // "1.241", "0:01.241", "1:02:03.456", "1.5s", "500ms"; -1 when unreadable.
     public static long ClockMs(string? clock)
     {
         var text = clock?.Trim();
@@ -207,8 +229,6 @@ public static partial class Formats
 
     sealed class HeadText { public List<LyricWord> Words = new(); public List<LyricWord> Backing = new(); public string Plain = ""; }
 
-    /// <summary>Apple Music TTML as lines: word or line timed, duet voices, backing vocals, and the
-    /// head's transliterations and translations matched onto each line by key.</summary>
     public static List<LyricLine>? ParseTtml(string? xml, string? translationLanguage = null)
     {
         if (string.IsNullOrWhiteSpace(xml) || !xml.Contains("<tt")) return null;
@@ -340,10 +360,15 @@ public static partial class Formats
                             }
                             if (line != null)
                             {
-                                if (lineStart >= 0) line.Start = lineStart;
-                                if (lineEnd > line.Start) line.End = lineEnd;
-                                line.Voice = voice;
                                 if (backing != null) line.Backing = LineFrom(backing.Words);
+                                // The <p> times may widen the line but never cut off words still being sung.
+                                bool timed = !line.Estimated && line.Words.Count > 0;
+                                if (lineStart >= 0) line.Start = timed ? Math.Min(lineStart, line.Words[0].Start) : lineStart;
+                                long end = line.End;
+                                if (lineEnd > line.Start) end = timed ? Math.Max(end, lineEnd) : lineEnd;
+                                if (line.Backing != null) end = Math.Max(end, line.Backing.End);
+                                line.End = Math.Max(end, line.Start);
+                                line.Voice = voice;
                                 lines.Add(line);
                                 keys.Add(key);
                             }
@@ -400,9 +425,7 @@ public static partial class Formats
             if (l.Backing != null) l.Backing.Align = l.Align;
         }
 
-        // Pronunciations: the first transliteration in the document.
         var pron = pronunciations.Values.FirstOrDefault();
-        // Translations: the language asked for (any region), else the first.
         Dictionary<string, HeadText>? trans = null;
         if (!string.IsNullOrEmpty(translationLanguage))
         {
@@ -435,7 +458,6 @@ public static partial class Formats
         return new LyricLine { Words = words, Start = words[0].Start, End = Math.Max(words[^1].End, words[0].Start) };
     }
 
-    /// <summary>Plain, untimed lyrics.</summary>
     public static List<LyricLine> ParsePlain(string text) =>
         Karaoke.StaticLines(text.Replace("\r", "").Split('\n'));
 }

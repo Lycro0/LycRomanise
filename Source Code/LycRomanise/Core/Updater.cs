@@ -7,9 +7,6 @@ namespace LycRomanise.Core;
 public sealed record UpdateAsset(string Name, string Url, long Size, string Sha256);
 public sealed record UpdateInfo(Version Version, string Tag, string PageUrl, string Notes, List<UpdateAsset> Assets);
 
-/// <summary>Checks GitHub for a newer release and installs it: the installer, run silently, for an
-/// installed copy; the new exe swapped in for a portable one. Every download is checked against the
-/// SHA-256 GitHub publishes for the file, and only github.com addresses are followed.</summary>
 public static class Updater
 {
     public const string Repo = "Lycro0/LycRomanise";
@@ -17,11 +14,16 @@ public static class Updater
     public const string SetupName = "LycRomanise_Setup.exe";
     const long MaxBytes = 400L * 1024 * 1024;
 
+    public static void CleanUp()
+    {
+        try { var p = Environment.ProcessPath; if (p != null) File.Delete(p + ".old"); } catch { }
+    }
+
     public static Version Current => typeof(Updater).Assembly.GetName().Version ?? new Version(0, 0);
     public static string CurrentText => Current.ToString(3);
     public static string ReleasesUrl => $"https://github.com/{Repo}/releases";
 
-    /// <summary>Inno Setup leaves unins000.exe beside an installed copy.</summary>
+    // Inno Setup leaves unins000.exe beside an installed copy.
     public static bool Installed => File.Exists(Path.Combine(AppContext.BaseDirectory, "unins000.exe"));
 
     static bool Trusted(string? url) =>
@@ -71,8 +73,7 @@ public static class Updater
 
     public static bool CanSelfUpdate(UpdateInfo info) => AssetFor(info) != null;
 
-    /// <summary>Downloads the right file, checks it, and starts the install; the app then quits.
-    /// Returns an error message, or null when the update has started.</summary>
+    // Returns an error message, or null when the update has started.
     public static async Task<string?> InstallAsync(UpdateInfo info, IProgress<double>? progress, CancellationToken ct)
     {
         var asset = AssetFor(info);
@@ -81,14 +82,23 @@ public static class Updater
         var dir = Path.Combine(Path.GetTempPath(), "LycRomanise-update");
         Directory.CreateDirectory(dir);
         var dest = Path.Combine(dir, asset.Name);
+        var part = dest + ".part";
         try
         {
+            // A portable copy must be able to replace its own exe: find out now, while the app can still say so.
+            if (!Installed)
+            {
+                var probe = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath!)!, ".lycromanise-write-test");
+                try { File.WriteAllText(probe, ""); File.Delete(probe); }
+                catch (Exception ex) { return "This folder cannot be written to, so the update cannot replace the app (" + ex.Message + "). Download it from the release page instead."; }
+            }
+            try { File.Delete(part); } catch { }
             using (var resp = await Http.Client.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, ct))
             {
                 resp.EnsureSuccessStatusCode();
                 if (!Trusted(resp.RequestMessage?.RequestUri?.ToString())) return "The download was redirected somewhere unexpected.";
                 await using var src = await resp.Content.ReadAsStreamAsync(ct);
-                await using var file = File.Create(dest);
+                await using var file = File.Create(part);
                 using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 var buf = new byte[81920];
                 long done = 0;
@@ -104,20 +114,25 @@ public static class Updater
                 if (Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant() != asset.Sha256)
                     return "The download did not match GitHub's checksum, so it was not installed.";
             }
+            // Only a complete, checked file ever takes the real name.
+            File.Move(part, dest, true);
             if (Installed)
             {
                 Process.Start(new ProcessStartInfo(dest, "/SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1") { UseShellExecute = true });
             }
             else
             {
-                // A portable copy: a tiny script waits for this process to end, swaps the exe in, and starts it.
+                // A running exe can be renamed, so swap now while failures can still be shown. The new exe is
+                // started only after this process exits, or the single-instance lock would turn it away.
                 var exe = Environment.ProcessPath!;
-                var script = Path.Combine(dir, "swap.cmd");
-                File.WriteAllText(script,
-                    "@echo off\r\n" +
-                    $":wait\r\ntasklist /FI \"PID eq {Environment.ProcessId}\" | find \"{Environment.ProcessId}\" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n" +
-                    $"move /y \"{dest}\" \"{exe}\" >nul\r\nstart \"\" \"{exe}\"\r\n");
-                Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"{script}\"") { CreateNoWindow = true, UseShellExecute = false });
+                var old = exe + ".old";
+                File.Move(exe, old, true);
+                try { File.Move(dest, exe); }
+                catch { try { File.Move(old, exe, true); } catch { } throw; }
+                string Quote(string v) => "'" + v.Replace("'", "''") + "'";
+                var ps = $"Wait-Process -Id {Environment.ProcessId} -Timeout 30 -ErrorAction SilentlyContinue; Start-Process -FilePath {Quote(exe)}";
+                var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(ps));
+                Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}") { CreateNoWindow = true, UseShellExecute = false });
             }
             return null;
         }

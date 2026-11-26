@@ -11,15 +11,29 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Length >= 3 && e.Args[0] == "--dump-lyrics")
+        {
+            // For videos: a cached lyrics file as the strip would show it, written as JSON.
+            try
+            {
+                var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(e.Args[1]).TrimStart((char)0xFEFF))!;
+                var r = System.Text.Json.JsonSerializer.Deserialize<LyricsResult>(node["Result"]!.ToJsonString(), new System.Text.Json.JsonSerializerOptions { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } })!;
+                var lines = AppController.Prepare(r, new AppSettings { Display = DisplayMode.OriginalAndRomanized });
+                File.WriteAllText(e.Args[2], System.Text.Json.JsonSerializer.Serialize(lines));
+            }
+            catch (Exception ex) { File.WriteAllText(e.Args[2] + ".err", ex.ToString()); }
+            Shutdown();
+            return;
+        }
         if (e.Args.Length >= 4 && e.Args[0] == "--probe")
         {
-            // Diagnostic: asks every source for one song and writes what each said.
+            // Diagnostic: what every source returns for one song.
             _ = Probe(e.Args[1], e.Args[2], int.Parse(e.Args[3]), e.Args.Length > 4 ? e.Args[4] : "probe.txt");
             return;
         }
         if (e.Args.Length >= 3 && e.Args[0] == "--selftest" && e.Args[2] == "app")
         {
-            // The whole app with fake playback (see SelfTestApp): needs the usual start-up, then the tests.
+            // The whole app with fake playback (see SelfTestApp).
             _single = new Mutex(true, "LycRomanise.Modern.SingleInstance", out _);
             DispatcherUnhandledException += (_, ex) => { Log.Error("ui", ex.Exception); ex.Handled = true; };
             TaskScheduler.UnobservedTaskException += (_, ex) => { Log.Error("task", ex.Exception); ex.SetObserved(); };
@@ -32,23 +46,44 @@ public partial class App : Application
         if (e.Args.Length >= 2 && e.Args[0] == "--selftest")
         {
             var mode = e.Args.Length > 2 ? e.Args[2] : "all";
-            (mode == "deep" ? SelfTestDeep.RunAsync(e.Args[1]) : SelfTest.RunAsync(e.Args[1], mode)).ContinueWith(_ => Dispatcher.Invoke(Shutdown));
+            (mode == "deep" ? SelfTestDeep.RunAsync(e.Args[1]) : mode == "fuzz" ? SelfTestFuzz.RunAsync(e.Args[1]) : SelfTest.RunAsync(e.Args[1], mode)).ContinueWith(_ => Dispatcher.Invoke(Shutdown));
             return;
         }
         _single = new Mutex(true, "LycRomanise.Modern.SingleInstance", out bool first);
         if (!first)
         {
-            // Already running: ask that copy to open its settings, then leave.
             UI.IpcSignal.Send(e.Args.Contains("--lyrics") ? UI.IpcSignal.Lyrics : UI.IpcSignal.Settings);
             Shutdown();
             return;
         }
-        DispatcherUnhandledException += (_, ex) => { Log.Error("ui", ex.Exception); ex.Handled = true; };
+        // Made before anything slow, so a second launch during start-up is not lost.
+        var ipcSettings = UI.IpcSignal.Create(UI.IpcSignal.Settings);
+        var ipcLyrics = UI.IpcSignal.Create(UI.IpcSignal.Lyrics);
         AppDomain.CurrentDomain.UnhandledException += (_, ex) => Log.Info("FATAL " + ex.ExceptionObject);
         TaskScheduler.UnobservedTaskException += (_, ex) => { Log.Error("task", ex.Exception); ex.SetObserved(); };
         Log.Info($"--- LycRomanise {typeof(App).Assembly.GetName().Version} starting");
-        _controller = new AppController();
-        _controller.Start(openSettings: e.Args.Contains("--settings"));
+        try
+        {
+            _controller = new AppController { IpcSettingsHandle = ipcSettings, IpcLyricsHandle = ipcLyrics };
+            _controller.Start(openSettings: e.Args.Contains("--settings"));
+        }
+        catch (Exception ex)
+        {
+            // Without this the error is swallowed and an invisible copy keeps the single-instance lock forever.
+            Log.Info("FATAL startup " + ex);
+            MessageBox.Show("LycRomanise could not start:\n" + ex.Message, "LycRomanise", MessageBoxButton.OK, MessageBoxImage.Error);
+            try { _controller?.Dispose(); } catch { }
+            _controller = null;
+            try { _single?.ReleaseMutex(); } catch { }
+            _single?.Dispose();
+            _single = null;
+            Shutdown(1);
+            return;
+        }
+        // Only once start-up worked: later UI errors are logged and the app keeps going.
+        DispatcherUnhandledException += (_, ex) => { Log.Error("ui", ex.Exception); ex.Handled = true; };
+        // Windows does not close windows on logoff/shutdown before ending the process: save now.
+        SessionEnding += (_, _) => _controller?.FlushForSessionEnd();
         if (e.Args.Contains("--lyrics")) _controller.ShowLyricsWindow();
         int demo = Array.IndexOf(e.Args, "--demo-looks");
         if (demo >= 0) _ = _controller.DemoLooksAsync(demo + 1 < e.Args.Length && double.TryParse(e.Args[demo + 1], out var sec) ? sec : 8);

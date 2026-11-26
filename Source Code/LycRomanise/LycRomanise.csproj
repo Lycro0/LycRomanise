@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -12,14 +12,15 @@
     <RootNamespace>LycRomanise</RootNamespace>
     <ApplicationIcon>Assets\lyrics-overlay.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.2.4</Version>
+    <Version>2.2.5</Version>
     <Product>LycRomanise</Product>
     <Copyright>Lycro</Copyright>
     <InvariantGlobalization>false</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <TieredPGO>true</TieredPGO>
     <ServerGarbageCollector>false</ServerGarbageCollector>
-    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <!-- Concurrent on caps the workstation gen0 budget near 6 MB (off lets it grow toward 200 MB) and runs gen2 in the background -->
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <NoWarn>$(NoWarn);WFO5001;WPF0001;CA1416</NoWarn>
   </PropertyGroup>
 

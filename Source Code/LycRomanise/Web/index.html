@@ -98,10 +98,21 @@ let state = null, stateAt = 0, lyrics = { lines: [] }, version = -1, coverVer = 
 let rows = [], active = -2, scroll = 0, userUntil = 0, userScroll = 0;
 const MOTION = { AppleMusic: [2.5, .5, .06], Glow: [1.5, 1, .06], Float: [7, .5, .09], Calm: [0, 0, 0], Snappy: [2, .3, .015] };
 
+// The request takes time both ways: the server read pos about halfway through it.
+function applyState(s, at) {
+  if (state && s.playing && state.playing && s.title === state.title) {
+    const cur = now(), fresh = s.pos + (performance.now() - at);
+    // A few ms back from request jitter: keep the clock going forward, so a line start does not flicker.
+    if (fresh < cur && cur - fresh < 80) { const pos = state.pos, a = stateAt; state = s; state.pos = pos; stateAt = a; return; }
+  }
+  state = s; stateAt = at;
+}
+
 async function poll() {
   try {
+    const t0 = performance.now();
     const s = await (await fetch("/state", { cache: "no-store" })).json();
-    state = s; stateAt = performance.now();
+    applyState(s, (t0 + performance.now()) / 2);
     $("title").textContent = s.title || "Waiting for music…";
     $("artist").textContent = s.artist || "";
     document.title = s.title ? `${s.title} · ${s.artist} - LycRomanise` : "LycRomanise";
@@ -121,10 +132,11 @@ async function poll() {
       build();
     }
   } catch (e) { }
-  setTimeout(poll, 1000);
+  setTimeout(poll, 250);   // pauses and seeks show within a quarter second
 }
 
-function now() { return !state ? 0 : state.playing ? state.pos + (performance.now() - stateAt) : state.pos; }
+// Capped: if the app stops answering, the clock stops instead of running on from the last answer.
+function now() { return !state ? 0 : state.playing ? state.pos + Math.min(performance.now() - stateAt, 1500) : state.pos; }
 function clock(ms) { ms = Math.max(0, ms) / 1000; const m = Math.floor(ms / 60), s = Math.floor(ms % 60); return `${m}:${String(s).padStart(2, "0")}`; }
 
 function words(line, cls) {

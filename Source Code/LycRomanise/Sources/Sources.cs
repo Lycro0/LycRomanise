@@ -21,8 +21,7 @@ static partial class SourceUtil
     [GeneratedRegex(@"^\s*(作?词|作?曲|词曲|編曲|编曲|作詞|制作人|製作人|制作|監製|监制|混音|母带|和声|和音|吉他|贝斯|鼓|弦乐|录音|錄音|出品|发行|發行|统筹|企划|OP|SP|ISRC|Lyrics?(\s+by)?|Lyricist|Composed\s+by|Composer|Music(\s+by)?|Produced\s+by|Producer|Written\s+by|Arranged\s+by|Arranger|Mixed\s+by|Mastered\s+by|Vocals?\s+by)\s*[:：]", RegexOptions.IgnoreCase)]
     private static partial Regex CreditLine();
 
-    /// <summary>Removes readings written into the lyric after kanji, "天使（てんし）", whether the source split
-    /// them into their own timed pieces (KuGou does, one character each) or kept them inside a word.</summary>
+    // Readings after kanji, "天使（てんし）", come either as their own timed pieces (KuGou, one character each) or inside a word.
     public static void DropFurigana(LyricLine line)
     {
         var w = line.Words;
@@ -34,8 +33,7 @@ static partial class SourceUtil
             int j = i + 1;
             while (j < w.Count && Kana(w[j].Text)) j++;
             if (j >= w.Count || j == i + 1 || w[j].Text is not ("）" or ")")) continue;
-            w[i - 1].End = w[j].End;                  // the kanji keep the reading's time
-            if (j + 1 < w.Count && !w[j + 1].Joined) { } // spacing after stays as it was
+            w[i - 1].End = w[j].End;
             w.RemoveRange(i, j - i + 1);
         }
         foreach (var x in w) x.Text = Romanize.Japanese.StripFurigana(x.Text);
@@ -48,15 +46,22 @@ static partial class SourceUtil
         lines = lines.Where((l, i) => !(i < 16 && CreditLine().IsMatch(l.Text))).ToList();
         foreach (var l in lines) DropFurigana(l);
         if (lines.Count == 0) return null;
+        lines = SortedByStart(lines);
         return new LyricsResult { SourceKey = key, Provider = provider, Lines = lines, Timing = timing ?? Karaoke.TimingOf(lines) };
+    }
+
+    // The views find the current line by scanning starts; OrderBy is stable, so lines sharing a start keep the source's order.
+    public static List<LyricLine> SortedByStart(List<LyricLine> lines)
+    {
+        for (int i = 1; i < lines.Count; i++)
+            if (lines[i].Start < lines[i - 1].Start) return lines.OrderBy(l => l.Start).ToList();
+        return lines;
     }
 
     public static bool CloseLength(int a, int b, int slack) => a <= 0 || b <= 0 || Math.Abs(a - b) <= slack;
 }
 
-// ===================================================================== Spicy Lyrics
-/// <summary>Spicy Lyrics Developer Platform, on the user's own publishable key, by Spotify track id.
-/// Community syllable syncs, else Apple Music's or Spotify's. The API's terms ask for the credit to show.</summary>
+// The Spicy Lyrics API's terms ask for the credit to show (CreditRequired).
 public sealed class SpicyLyricsSource : ILyricsSource
 {
     const string Api = "https://api.spicylyrics.org/v1/lyrics/";
@@ -84,7 +89,7 @@ public sealed class SpicyLyricsSource : ILyricsSource
         var key = _key();
         if (string.IsNullOrEmpty(key)) { Status = "Needs a key"; return null; }
         if (q.SpotifyId is not { Length: 22 }) return null;
-        if (DateTime.UtcNow < _refusedUntil || DateTime.UtcNow < _waitUntil) return null;
+        if (DateTime.UtcNow < _refusedUntil || DateTime.UtcNow < _waitUntil) { Http.MarkDegraded(); return null; }
         var reply = await Http.GetAsync(Api + q.SpotifyId, new Dictionary<string, string>
         {
             ["Authorization"] = "Bearer " + key, ["Accept"] = "application/json", ["User-Agent"] = Http.AppAgent,
@@ -107,6 +112,7 @@ public sealed class SpicyLyricsSource : ILyricsSource
                 _ => "Key rejected",
             };
             _refusedUntil = DateTime.UtcNow.AddMinutes(10);
+            Http.MarkDegraded();
             Log.Info($"spicy: key refused ({reply.Status} {code})");
             return null;
         }
@@ -172,7 +178,8 @@ public sealed class SpicyLyricsSource : ILyricsSource
         }
         else if (type == "Line")
         {
-            var kept = body.Dig("Content").Items().Where(i => S(i, "Text") is { } t && t.Trim() is { Length: > 0 } tt && tt != "♪").ToList();
+            var kept = body.Dig("Content").Items().Where(i => S(i, "Text") is { } t && t.Trim() is { Length: > 0 } tt && tt != "♪")
+                .OrderBy(i => i.Dig("StartTime").Ms()).ToList();   // stable: ends come from the next start
             var starts = new List<long>();
             var texts = new List<string>();
             var map = new List<int>();
@@ -198,6 +205,7 @@ public sealed class SpicyLyricsSource : ILyricsSource
             lines = Karaoke.StaticLines(body.Dig("Lines").Items().Select(r => S(r, "Text") ?? ""));
         }
         if (lines.Count == 0) return null;
+        lines = SourceUtil.SortedByStart(lines);
 
         var result = new LyricsResult { SourceKey = "spicy", Lines = lines, Timing = Karaoke.TimingOf(lines), CreditRequired = true };
         var source = S(body, "source");
@@ -225,8 +233,6 @@ public sealed class SpicyLyricsSource : ILyricsSource
     }
 }
 
-// ===================================================================== BiniLyrics
-/// <summary>Apple-style TTML by ISRC from lrc.red, else BiniLyrics' search by name.</summary>
 public sealed class BiniLyricsSource : ILyricsSource
 {
     public string Key => "bini";
@@ -269,9 +275,6 @@ public sealed class BiniLyricsSource : ILyricsSource
     LyricsResult? From(string ttml) => SourceUtil.Result(Key, Name, Formats.ParseTtml(ttml, _translationLang()));
 }
 
-// ===================================================================== Imported
-/// <summary>The user's own lyric files: .ttml, .lrc (incl. enhanced), .txt, named "Artist - Title" or
-/// "Title", in the imported lyrics folder (searched recursively).</summary>
 public sealed class ImportedSource : ILyricsSource
 {
     public string Key => "imported";
@@ -325,9 +328,7 @@ public sealed class ImportedSource : ILyricsSource
     }
 }
 
-// ===================================================================== Musixmatch
-/// <summary>Musixmatch, through its mobile app's anonymous token. Also the matcher the app uses to find
-/// a track's Spotify id and ISRC for Spicy Lyrics and BiniLyrics.</summary>
+// Uses the mobile app's anonymous token. Also the matcher that finds the Spotify id and ISRC Spicy Lyrics and BiniLyrics need.
 public sealed class MusixmatchSource : ILyricsSource
 {
     const string Api = "https://apic-appmobile.musixmatch.com/ws/1.1/";
@@ -382,8 +383,7 @@ public sealed class MusixmatchSource : ILyricsSource
         finally { _tokenGate.Release(); }
     }
 
-    /// <summary>macro.subtitles.get for the track, kept for the session. Runs the matcher and every
-    /// lyrics lookup in one call.</summary>
+    // One macro.subtitles.get runs the matcher and every lyrics lookup.
     async Task<JsonNode?> Macro(TrackQuery q, CancellationToken ct)
     {
         var cacheKey = q.Key + "|" + q.Seconds;
@@ -417,7 +417,6 @@ public sealed class MusixmatchSource : ILyricsSource
         return null;
     }
 
-    /// <summary>Fills in what Musixmatch's matcher knows of the track: Spotify id, ISRC, its names.</summary>
     public async Task Identify(TrackQuery q, CancellationToken ct)
     {
         if (q.Title.Length == 0) return;
@@ -463,8 +462,9 @@ public sealed class MusixmatchSource : ILyricsSource
         var sub = calls.Dig("track.subtitles.get", "message", "body", "subtitle_list").Items().FirstOrDefault().Dig("subtitle");
         if (sub is JsonObject && !sub.Dig("restricted").Truthy() && Parse(sub.Dig("subtitle_body").Str()) is JsonArray sbody && sbody.Count > 0)
         {
-            var starts = sbody.Select(x => x.Dig("time", "total").Ms()).ToList();
-            var texts = sbody.Select(x => x.Dig("text").Str() ?? "").ToList();
+            var rows = sbody.Where(x => x != null).OrderBy(x => x!.Dig("time", "total").Ms()).ToList();   // ends come from the next start
+            var starts = rows.Select(x => x.Dig("time", "total").Ms()).ToList();
+            var texts = rows.Select(x => x.Dig("text").Str() ?? "").ToList();
             if (Karaoke.EstimatedLines(starts, texts) is { Count: > 0 } est) return SourceUtil.Result(Key, Name, est, Timing.Line);
         }
         var plain = calls.Dig("track.lyrics.get", "message", "body", "lyrics");
@@ -478,7 +478,7 @@ public sealed class MusixmatchSource : ILyricsSource
 
     static JsonNode? Parse(string? s) { if (s == null) return null; try { return JsonNode.Parse(s); } catch { return null; } }
 
-    /// <summary>[{ts, te, x, l:[{c, o}]}]: o is from the line start; a space entry ends the word before it.</summary>
+    // [{ts, te, x, l:[{c, o}]}]: o counts from the line start; a space entry ends the word before it.
     static LyricLine? RichsyncLine(JsonNode entry, long start, long end)
     {
         var words = new List<LyricWord>();
@@ -506,7 +506,7 @@ public sealed class MusixmatchSource : ILyricsSource
         return new LyricLine { Words = words, Start = start, End = Math.Max(end, words[^1].End) };
     }
 
-    /// <summary>The community translations of the track's lines in a language, keyed by the line's folded text.</summary>
+    // Keyed by LineKey of the original line.
     public async Task<Dictionary<string, string>?> Translations(TrackQuery q, string language, CancellationToken ct)
     {
         if (q.MusixmatchCommontrack == null) await Identify(q, ct);
@@ -550,7 +550,6 @@ public sealed class MusixmatchSource : ILyricsSource
     }
 }
 
-// ===================================================================== Unison
 public sealed class UnisonSource : ILyricsSource
 {
     public string Key => "unison";
@@ -581,7 +580,6 @@ public sealed class UnisonSource : ILyricsSource
     }
 }
 
-// ===================================================================== NetEase
 public sealed class NetEaseSource : ILyricsSource
 {
     public string Key => "netease";
@@ -619,7 +617,6 @@ public sealed class NetEaseSource : ILyricsSource
     }
 }
 
-// ===================================================================== LRCLIB
 public sealed class LrcLibSource : ILyricsSource
 {
     public string Key => "lrclib";
@@ -663,7 +660,6 @@ public sealed class LrcLibSource : ILyricsSource
     }
 }
 
-// ===================================================================== QQ Music
 public sealed class QQMusicSource : ILyricsSource
 {
     public string Key => "qq";
@@ -717,7 +713,6 @@ public sealed class QQMusicSource : ILyricsSource
     }
 }
 
-// ===================================================================== KuGou
 public sealed class KuGouSource : ILyricsSource
 {
     public string Key => "kugou";
@@ -777,8 +772,6 @@ public sealed class KuGouSource : ILyricsSource
     }
 }
 
-// ===================================================================== Genius
-/// <summary>Genius: plain, untimed lyrics as a last resort, read from the song's page.</summary>
 public sealed partial class GeniusSource : ILyricsSource
 {
     public string Key => "genius";
@@ -821,8 +814,7 @@ public sealed partial class GeniusSource : ILyricsSource
     [GeneratedRegex(@"^\[[^\]]*\]$")] private static partial Regex SectionHeader();
     [GeneratedRegex(@"<(/?)([a-zA-Z0-9]+)([^>]*)>")] private static partial Regex Tag();
 
-    /// <summary>The text of every data-lyrics-container element, without the parts Genius marks as
-    /// excluded from selection (headers, ads); &lt;br&gt; is a new line.</summary>
+    // Genius marks headers and ads inside the lyrics containers with data-exclude-from-selection.
     public static string ExtractLyrics(string html)
     {
         var sb = new StringBuilder();

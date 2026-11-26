@@ -4,7 +4,6 @@ using LycRomanise.Core;
 
 namespace LycRomanise.UI;
 
-/// <summary>System-wide shortcuts, through RegisterHotKey on a message-only window.</summary>
 public sealed class Hotkeys : IDisposable
 {
     [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hwnd, int id, uint mods, uint vk);
@@ -24,6 +23,9 @@ public sealed class Hotkeys : IDisposable
         ("Ctrl + Alt + ← / →", "This song's lyrics earlier / later"),
         ("Ctrl + Alt + Space", "Play / pause"),
     };
+    // The virtual keys behind each Defaults row, in the same order.
+    public static readonly uint[][] DefaultKeys = { new uint[] { 0x4C }, new uint[] { 0x4B }, new uint[] { 0x48 }, new uint[] { 0x25, 0x27 }, new uint[] { 0x20 } };
+    public HashSet<uint> Failed { get; } = new();
 
     public Hotkeys()
     {
@@ -37,17 +39,20 @@ public sealed class Hotkeys : IDisposable
         return IntPtr.Zero;
     }
 
-    public void Register(uint vk, Action action)
+    public bool Register(uint vk, Action action)
     {
         int id = _next++;
-        if (RegisterHotKey(_source.Handle, id, Ctrl | Alt | NoRepeat, vk)) _actions[id] = action;
-        else Log.Info($"hotkey 0x{vk:X} is taken by another app");
+        if (RegisterHotKey(_source.Handle, id, Ctrl | Alt | NoRepeat, vk)) { _actions[id] = action; return true; }
+        Log.Info($"hotkey 0x{vk:X} is taken by another app");
+        Failed.Add(vk);
+        return false;
     }
 
     public void Clear()
     {
         foreach (var id in _actions.Keys) UnregisterHotKey(_source.Handle, id);
         _actions.Clear();
+        Failed.Clear();
     }
 
     public void Dispose()

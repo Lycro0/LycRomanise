@@ -7,8 +7,7 @@ using LycRomanise.Core;
 
 namespace LycRomanise.Web;
 
-/// <summary>A tiny web server for phones, tablets and OBS browser sources on the same network. The page
-/// polls /state and draws the sweep itself, so the PC sends almost nothing.</summary>
+// The page polls /state and draws the sweep itself, so the PC sends almost nothing.
 public sealed class WebServer
 {
     readonly AppController _app;
@@ -37,7 +36,7 @@ public sealed class WebServer
             }
         }
         catch { }
-        return "localhost";
+        return "127.0.0.1";   // a literal address: never waits on name resolution
     }
 
     public void Start(int port)
@@ -46,7 +45,8 @@ public sealed class WebServer
         {
             Port = port;
             _cts = new CancellationTokenSource();
-            _listener = new TcpListener(IPAddress.Any, port);
+            // Dual-stack, so http://localhost (which tries ::1 first) connects without a refused IPv6 attempt.
+            _listener = TcpListener.Create(port);
             _listener.Start();
             _ = AcceptLoop(_listener, _cts.Token);
             Log.Info($"web view on {Url}");
@@ -67,7 +67,7 @@ public sealed class WebServer
         _listener = null;
     }
 
-    /// <summary>Called on the UI thread when the track or lyrics change.</summary>
+    // UI thread only.
     public void Notify(bool lyricsChanged = false)
     {
         if (!lyricsChanged) return;
@@ -125,7 +125,10 @@ public sealed class WebServer
         {
             try
             {
-                client.ReceiveTimeout = 5000;
+                // ReceiveTimeout does not apply to async reads: a deadline so a silent client cannot hold its socket.
+                using var reqCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                reqCts.CancelAfter(10000);
+                ct = reqCts.Token;
                 var stream = client.GetStream();
                 var buf = new byte[4096];
                 int n = await stream.ReadAsync(buf, ct);
@@ -134,6 +137,7 @@ public sealed class WebServer
                 var firstLine = request.Split("\r\n")[0].Split(' ');
                 if (firstLine.Length < 2 || firstLine[0] != "GET") { await Send(stream, 405, "text/plain", "method not allowed", ct); return; }
                 var path = firstLine[1].Split('?')[0];
+                if (!HostAllowed(request)) { await Send(stream, 403, "text/plain", "forbidden", ct); return; }
                 switch (path)
                 {
                     case "/" when firstLine[1].Contains("obs=1"):
@@ -166,6 +170,19 @@ public sealed class WebServer
         }
     }
 
+    // Only names that really point at this machine: stops a DNS-rebinding page from reading what is playing.
+    static bool HostAllowed(string request)
+    {
+        var line = request.Split("\r\n").FirstOrDefault(l => l.StartsWith("Host:", StringComparison.OrdinalIgnoreCase));
+        if (line == null) return true;   // HTTP/1.0
+        var host = line[5..].Trim();
+        if (host.StartsWith('[')) host = host[1..Math.Max(1, host.IndexOf(']'))];
+        else if (host.Count(c => c == ':') == 1) host = host[..host.IndexOf(':')];
+        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || IPAddress.TryParse(host, out _)
+               || host.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase)
+               || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
+    }
+
     static readonly Dictionary<string, string> _pages = new();
     static string Page(string name)
     {
@@ -189,7 +206,7 @@ public sealed class WebServer
     {
         var bytes = Encoding.UTF8.GetBytes(body);
         var head = $"HTTP/1.1 {status} {(status == 200 ? "OK" : "Error")}\r\nContent-Type: {type}\r\nContent-Length: {bytes.Length}\r\n" +
-                   "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+                   "Cache-Control: no-store\r\nConnection: close\r\n\r\n";   // no CORS: the pages are same-origin, other sites must not read this
         await stream.WriteAsync(Encoding.ASCII.GetBytes(head), ct);
         await stream.WriteAsync(bytes, ct);
     }

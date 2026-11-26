@@ -5,8 +5,6 @@ using LycRomanise.Core;
 
 namespace LycRomanise.UI;
 
-/// <summary>A line as the strip shows it: the main text (original or romanized), what goes under it,
-/// and the backing vocals.</summary>
 public sealed class DisplayLine
 {
     public required LyricLine Main { get; init; }
@@ -21,9 +19,7 @@ public sealed class DisplayLine
 public sealed class KaraokeStyle
 {
     public StripStyle Layout = StripStyle.Modern;
-    /// <summary>How far a word rises as it is sung, in pixels at the main size (Apple Music style).</summary>
-    public double WordLift;
-    /// <summary>A soft halo around the sung part of the line.</summary>
+    public double WordLift;   // pixels at the main size
     public bool WordGlow;
     public Color Unsung, Sung, Next, Outline, Sub;
     public Typeface Typeface = new("Segoe UI");
@@ -32,8 +28,7 @@ public sealed class KaraokeStyle
     public TextAlignment Align = TextAlignment.Center;
 }
 
-/// <summary>Draws the karaoke strip. Text geometry is built once per line and size; each frame only
-/// moves the sweep and the transition, so it stays cheap on the GPU.</summary>
+// Text geometry is built once per line and size; a frame only moves the sweep and the transition.
 public sealed class KaraokeView : FrameworkElement
 {
     public KaraokeStyle Style { get; private set; } = new();
@@ -49,6 +44,11 @@ public sealed class KaraokeView : FrameworkElement
     bool _rendering;
     bool _hasDuet;
     readonly Dictionary<(LyricLine, double, double), RowLayout[]> _layoutCache = new();
+    // Plain text (title card, notices, translations) keeps one LyricLine per string, so its layout is cached.
+    readonly Dictionary<string, LyricLine> _plainLines = new();
+    // Frame skipping: the clock time of the last drawing and the time before which it cannot change.
+    long _lastT, _quietUntil = long.MinValue;
+    TimeSpan _lastFrame;
     double _dpi = 1;
 
     const double TransitionMs = 320;
@@ -63,6 +63,8 @@ public sealed class KaraokeView : FrameworkElement
     {
         Style = style;
         _layoutCache.Clear();
+        _glowPens.Clear();
+        _quietUntil = long.MinValue;
         InvalidateMeasure();
         InvalidateVisual();
     }
@@ -77,6 +79,8 @@ public sealed class KaraokeView : FrameworkElement
         _shownIndex = -2;
         _fromIndex = -2;
         _layoutCache.Clear();
+        _plainLines.Clear();
+        _quietUntil = long.MinValue;
         InvalidateVisual();
     }
 
@@ -86,22 +90,40 @@ public sealed class KaraokeView : FrameworkElement
     {
         _titleCard = text;
         _titleCardAt = DateTime.UtcNow;
+        _quietUntil = long.MinValue;
         InvalidateVisual();
     }
 
-    public void SetNotice(string? text) { _notice = text; InvalidateVisual(); }
+    public void SetNotice(string? text) { _notice = text; _quietUntil = long.MinValue; InvalidateVisual(); }
 
-    /// <summary>Redraws every frame while playing; stops when nothing moves, so an idle strip uses no CPU.</summary>
     public void SetAnimating(bool on)
     {
         if (on == _rendering) return;
         _rendering = on;
         if (on) CompositionTarget.Rendering += OnFrame;
         else CompositionTarget.Rendering -= OnFrame;
+        _quietUntil = long.MinValue;
         InvalidateVisual();
     }
 
-    void OnFrame(object? sender, EventArgs e) => InvalidateVisual();
+    void OnFrame(object? sender, EventArgs e)
+    {
+        // At most about 60 redraws a second: on a 144-165 Hz screen the sweep looks no smoother, and the
+        // transparent window costs a software render and copy per frame.
+        if (e is RenderingEventArgs re)
+        {
+            if ((re.RenderingTime - _lastFrame).TotalMilliseconds < 15 && re.RenderingTime >= _lastFrame) return;
+            _lastFrame = re.RenderingTime;
+        }
+        // Nothing on screen changes before _quietUntil (a held, finished line, a gap between words).
+        // The handler stays on, so a seek backwards (t < _lastT) is still seen at once.
+        if (_quietUntil != long.MinValue && _clock != null)
+        {
+            long t = _clock();
+            if (t >= _lastT && t < _quietUntil) return;
+        }
+        InvalidateVisual();
+    }
 
     // ------------------------------------------------------------- sizes
     double MainSize => Style.FontSize;
@@ -111,13 +133,10 @@ public sealed class KaraokeView : FrameworkElement
     double BackingSize => Style.FontSize * 0.5;
     double LineH(double size) => size * 1.32;
 
-    /// <summary>The height the strip needs: two rows of the main line, two of romanization, then the
-    /// translation, backing vocals and the next line.</summary>
     public double DesiredStripHeight()
     {
         if (Style.Layout == StripStyle.Classic)
         {
-            // v1's strip: the line being sung and the next one straight under it.
             double c = 18 + LineH(MainSize) * 2 + LineH(NextSize) * 1.2;
             if (Style.ShowBacking) c += LineH(BackingSize) * 0.6;
             if (Style.ShowTranslation) c += LineH(TransSize);
@@ -141,18 +160,17 @@ public sealed class KaraokeView : FrameworkElement
         public Geometry Geometry = Geometry.Empty;
         public double Width, Height;
         public List<(double x0, double x1, long start, long end)> Words = new();
+        public List<Geometry>? WordGeometry;   // each word's glyphs, cut from the row once
     }
 
     FormattedText Format(string text, double size) =>
         new(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, Style.Typeface, size, Brushes.White, _dpi);
 
-    /// <summary>Splits a line into rows that fit the width (shrinking the font a little first), and
-    /// records where each word sits so the sweep can follow the singing.</summary>
     RowLayout[] Layout(LyricLine line, double size, double maxWidth, int maxRows = 2)
     {
         var key = (line, size, maxWidth * 10 + maxRows);
         if (_layoutCache.TryGetValue(key, out var cached)) return cached;
-        if (_layoutCache.Count > 64) _layoutCache.Clear();
+        if (_layoutCache.Count > 256) _layoutCache.Clear();
 
         var words = line.Words;
         string Joined(int from, int to)
@@ -168,7 +186,6 @@ public sealed class KaraokeView : FrameworkElement
             double k = Math.Max(0.55, maxWidth * maxRows * 0.9 / full);
             size *= k; full *= k;
         }
-        // Shrink to fit before wrapping, down to 80 %.
         if (full > maxWidth && full * 0.8 <= maxWidth) { size *= maxWidth / full; full = maxWidth; }
         var breaks = new List<(int from, int to)>();
         if (full <= maxWidth || words.Count <= 1) breaks.Add((0, words.Count));
@@ -212,13 +229,34 @@ public sealed class KaraokeView : FrameworkElement
                 row.Words.Add((x0, x1, words[i].Start, words[i].End));
                 pos += len;
             }
+            if (Style.WordLift > 0 || Style.WordGlow)
+            {
+                // Cut from the row geometry (not laid out word by word) so kerning and shaping stay the same.
+                row.WordGeometry = new List<Geometry>(row.Words.Count);
+                for (int i = 0; i < row.Words.Count; i++)
+                {
+                    var (left, right) = WordBand(row, i, size);
+                    var g = Geometry.Combine(row.Geometry, new RectangleGeometry(new Rect(left, -size, right - left, row.Height + size * 2)),
+                        GeometryCombineMode.Intersect, null);
+                    g.Freeze();
+                    row.WordGeometry.Add(g);
+                }
+            }
             result[r] = row;
         }
         _layoutCache[key] = result;
         return result;
     }
 
-    /// <summary>How far across the row the singing has got, in pixels.</summary>
+    // A word's slice of the row: cut halfway across the gaps, so no glyph is clipped.
+    static (double left, double right) WordBand(RowLayout row, int i, double size)
+    {
+        var (x0, x1, _, _) = row.Words[i];
+        double left = i == 0 ? -size : (row.Words[i - 1].x1 + x0) / 2;
+        double right = i == row.Words.Count - 1 ? row.Width + size : (x1 + row.Words[i + 1].x0) / 2;
+        return (left, right);
+    }
+
     static double SweepX(RowLayout row, long t)
     {
         if (row.Words.Count == 0) return 0;
@@ -257,6 +295,52 @@ public sealed class KaraokeView : FrameworkElement
         return _pens[key] = p;
     }
 
+    readonly Dictionary<(Color, double), Pen> _glowPens = new();
+    Pen GlowPen(Color c, double width)
+    {
+        var key = (c, Math.Round(width, 1));
+        if (_glowPens.TryGetValue(key, out var p)) return p;
+        if (_glowPens.Count > 128) _glowPens.Clear();
+        p = new Pen(Brush(c), key.Item2) { LineJoin = PenLineJoin.Round };
+        p.Freeze();
+        return _glowPens[key] = p;
+    }
+
+    static readonly GradientStopCollection MaskStops = MakeMaskStops();
+    static GradientStopCollection MakeMaskStops()
+    {
+        var g = new GradientStopCollection { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) };
+        g.Freeze();
+        return g;
+    }
+
+    // Opaque up to a, fading out by b.
+    static LinearGradientBrush Mask(double a, double b)
+    {
+        var m = new LinearGradientBrush(MaskStops, new Point(a, 0), new Point(b, 0)) { MappingMode = BrushMappingMode.Absolute };
+        m.Freeze();
+        return m;
+    }
+
+    static TranslateTransform Move(double x, double y)
+    {
+        var tt = new TranslateTransform(x, y);
+        tt.Freeze();
+        return tt;
+    }
+
+    // Earliest clock time at which the drawing will change; long.MinValue means every frame.
+    static long QuietUntil(LyricLine? line, long t, long until)
+    {
+        if (line == null || until == long.MinValue) return until;
+        foreach (var w in line.Words)
+        {
+            if (w.Start <= t && t < w.End) return long.MinValue;   // a word is being sung
+            if (w.Start > t) until = Math.Min(until, w.Start);
+        }
+        return until;
+    }
+
     double RowX(double width, LineAlign align)
     {
         double pad = 16, avail = ActualWidth - pad * 2;
@@ -272,7 +356,6 @@ public sealed class KaraokeView : FrameworkElement
             ? Math.Max(0, avail - width) * 0.36 : 0);
     }
 
-    /// <summary>Draws a timed line in rows from y, returns the height used.</summary>
     double DrawSwept(DrawingContext dc, LyricLine line, double size, double y, long t, LineAlign align,
         Color unsung, Color sung, double opacity, bool sweep, int maxRows = 2)
     {
@@ -283,7 +366,7 @@ public sealed class KaraokeView : FrameworkElement
         {
             var row = rows[r];
             double x = RowX(row.Width, align);
-            dc.PushTransform(new TranslateTransform(x, y + used));
+            dc.PushTransform(Move(x, y + used));
             if (sweep && (Style.WordLift > 0 || Style.WordGlow))
             {
                 DrawRowLifted(dc, row, size, t, unsung, sung, opacity, pen);
@@ -299,16 +382,10 @@ public sealed class KaraokeView : FrameworkElement
                 if (sx > 0)
                 {
                     double soft = Style.Smooth ? Math.Max(6, size * 0.35) : 0.5;
-                    var mask = new LinearGradientBrush
-                    {
-                        MappingMode = BrushMappingMode.Absolute,
-                        StartPoint = new Point(sx - soft, 0), EndPoint = new Point(sx + 0.01, 0),
-                        GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
-                    };
                     if (sx >= row.Width) { dc.DrawGeometry(Brush(Fade(sung, opacity)), null, row.Geometry); }
                     else
                     {
-                        dc.PushOpacityMask(mask);
+                        dc.PushOpacityMask(Mask(sx - soft, sx + 0.01));
                         dc.DrawGeometry(Brush(Fade(sung, opacity)), null, row.Geometry);
                         dc.Pop();
                     }
@@ -320,52 +397,62 @@ public sealed class KaraokeView : FrameworkElement
         return used;
     }
 
-    /// <summary>A row drawn word by word, each word rising a little as it is sung and the sung part
-    /// glowing: the Apple Music look.</summary>
     void DrawRowLifted(DrawingContext dc, RowLayout row, double size, long t, Color unsung, Color sung, double opacity, Pen? pen)
     {
-        double sx = SweepX(row, t);
         double soft = Style.Smooth ? Math.Max(6, size * 0.35) : 0.5;
-        var mask = new LinearGradientBrush
-        {
-            MappingMode = BrushMappingMode.Absolute,
-            StartPoint = new Point(sx - soft, 0), EndPoint = new Point(sx + 0.01, 0),
-            GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
-        };
         double lift = Style.WordLift * size / MainSize;
         Pen? glowWide = null, glowNarrow = null;
         if (Style.WordGlow)
         {
-            glowWide = new Pen(Brush(Fade(sung, 0.14 * opacity)), size * 0.22) { LineJoin = PenLineJoin.Round };
-            glowNarrow = new Pen(Brush(Fade(sung, 0.22 * opacity)), size * 0.1) { LineJoin = PenLineJoin.Round };
+            glowWide = GlowPen(Fade(sung, 0.14 * opacity), size * 0.22);
+            glowNarrow = GlowPen(Fade(sung, 0.22 * opacity), size * 0.1);
         }
+        var unsungBrush = Brush(Fade(unsung, opacity));
+        var sungBrush = Brush(Fade(sung, opacity));
         for (int i = 0; i < row.Words.Count; i++)
         {
             var (x0, x1, start, end) = row.Words[i];
-            // Cut between words halfway across the gap, so no glyph is clipped.
-            double left = i == 0 ? -size : (row.Words[i - 1].x1 + x0) / 2;
-            double right = i == row.Words.Count - 1 ? row.Width + size : (x1 + row.Words[i + 1].x0) / 2;
+            // Only this word's glyphs: drawing the whole row under a clip cost a full row per word.
+            Geometry g = row.WordGeometry != null && i < row.WordGeometry.Count ? row.WordGeometry[i] : row.Geometry;
+            bool clip = ReferenceEquals(g, row.Geometry);
             double f = t <= start ? 0 : t >= end ? 1 : (t - start) / (double)Math.Max(1, end - start);
             double rise = lift * (1 - Math.Pow(1 - f, 3));
-            dc.PushClip(new RectangleGeometry(new Rect(left, -size, right - left, row.Height + size * 2)));
-            dc.PushTransform(new TranslateTransform(0, -rise));
-            if (pen != null) dc.DrawGeometry(null, pen, row.Geometry);
-            dc.DrawGeometry(Brush(Fade(unsung, opacity)), null, row.Geometry);
-            if (f > 0 && sx > 0)
+            if (clip)
             {
-                dc.PushOpacityMask(mask);
-                if (glowWide != null) { dc.DrawGeometry(null, glowWide, row.Geometry); dc.DrawGeometry(null, glowNarrow, row.Geometry); }
-                dc.DrawGeometry(Brush(Fade(sung, opacity)), null, row.Geometry);
+                var (left, right) = WordBand(row, i, size);
+                dc.PushClip(new RectangleGeometry(new Rect(left, -size, right - left, row.Height + size * 2)));
+            }
+            dc.PushTransform(Move(0, -rise));
+            if (pen != null) dc.DrawGeometry(null, pen, g);
+            if (f < 1) dc.DrawGeometry(unsungBrush, null, g);
+            if (f >= 1)
+            {
+                // Finished: solid, so the end of the last letter and its glow are not left unsung.
+                if (glowWide != null) { dc.DrawGeometry(null, glowWide, g); dc.DrawGeometry(null, glowNarrow, g); }
+                dc.DrawGeometry(sungBrush, null, g);
+            }
+            else if (f > 0)
+            {
+                // The soft edge trails the sweep point, so this word's sweep runs to x1 + soft: fully
+                // coloured exactly at its end, with no jump when it turns solid.
+                double se = x0 + (x1 + soft - x0) * f;
+                dc.PushOpacityMask(Mask(se - soft, se + 0.01));
+                if (glowWide != null) { dc.DrawGeometry(null, glowWide, g); dc.DrawGeometry(null, glowNarrow, g); }
+                dc.DrawGeometry(sungBrush, null, g);
                 dc.Pop();
             }
             dc.Pop();
-            dc.Pop();
+            if (clip) dc.Pop();
         }
     }
 
     double DrawPlain(DrawingContext dc, string text, double size, double y, Color color, double opacity, LineAlign align = LineAlign.Leading, int maxRows = 1)
     {
-        var line = Karaoke.SpreadWords(text, 0, 0);
+        if (!_plainLines.TryGetValue(text, out var line))
+        {
+            if (_plainLines.Count > 256) _plainLines.Clear();
+            _plainLines[text] = line = Karaoke.SpreadWords(text, 0, 0);
+        }
         return DrawSwept(dc, line, size, y, 0, align, color, color, opacity, false, maxRows);
     }
 
@@ -383,7 +470,7 @@ public sealed class KaraokeView : FrameworkElement
 
     static double Ease(double x) => 1 - Math.Pow(1 - Math.Clamp(x, 0, 1), 3);
 
-    /// <summary>Time spent building frames, for the self-test's performance numbers.</summary>
+    // For the self-test's performance numbers.
     public static double RenderMs; public static int RenderCount;
 
     protected override void OnRender(DrawingContext dc)
@@ -395,6 +482,14 @@ public sealed class KaraokeView : FrameworkElement
 
     void RenderCore(DrawingContext dc)
     {
+        long until = long.MaxValue;
+        _lastT = _clock?.Invoke() ?? 0;
+        RenderFrame(dc, _lastT, ref until);
+        _quietUntil = until <= _lastT ? long.MinValue : until;
+    }
+
+    void RenderFrame(DrawingContext dc, long t, ref long until)
+    {
         // A hit-testable surface across the whole strip, so it can be dragged anywhere.
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
         double top = 10;
@@ -404,9 +499,10 @@ public sealed class KaraokeView : FrameworkElement
             DrawPlain(dc, _notice, SubSize, top + LineH(MainSize) * 0.5, Style.Next, 0.9, LineAlign.Leading, 2);
             return;
         }
-        long t = _clock?.Invoke() ?? 0;
+        // The title card times out on the wall clock and the unsynced view moves through lines by time:
+        // both are simply redrawn every frame.
+        if ((_titleCard != null && (DateTime.UtcNow - _titleCardAt).TotalSeconds < 7.5) || !_synced) until = long.MinValue;
 
-        // Title card: "Artist - Song" for a few seconds, or until the first line.
         bool titleShowing = _titleCard != null && (DateTime.UtcNow - _titleCardAt).TotalSeconds < 7
             && (_lines.Count == 0 || !_synced || t < _lines[0].Start - 300);
         if (_lines.Count == 0)
@@ -423,10 +519,29 @@ public sealed class KaraokeView : FrameworkElement
             _transitionAt = DateTime.UtcNow;
         }
         double p = Ease((DateTime.UtcNow - _transitionAt).TotalMilliseconds / TransitionMs);
+        if (p < 1 || idx < 0) until = long.MinValue;   // transitions move, and the countdown breathes
+        else if (until != long.MinValue)
+        {
+            var c = _lines[idx];
+            var n = idx + 1 < _lines.Count ? _lines[idx + 1] : null;
+            bool breakView = t > c.End + 1200 && (n == null || n.Start - t > 2200);
+            if (breakView && n != null) until = long.MinValue;   // the dots breathe
+            else
+            {
+                if (n != null)
+                {
+                    until = Math.Min(until, n.Start);
+                    if (n.Start - 2200 > t) until = Math.Min(until, n.Start - 2200);   // where the break view stops
+                }
+                if (c.End + 1201 > t) until = Math.Min(until, c.End + 1201);   // where it can start
+                until = QuietUntil(c.Main, t, until);
+                until = QuietUntil(c.Sub, t, until);
+                until = QuietUntil(c.Backing, t, until);
+            }
+        }
 
         if (idx < 0)
         {
-            // Before the first line: title card, then a countdown as the first line nears.
             if (titleShowing) DrawPlain(dc, _titleCard!, MainSize * 0.8, top + LineH(MainSize) * 0.3, Style.Unsung, 1, LineAlign.Leading, 2);
             else DrawCountdown(dc, top + LineH(MainSize) * 0.5, t, 0, _lines[0].Start);
             if (Style.ShowNext) DrawNext(dc, 0, 1);
@@ -449,7 +564,6 @@ public sealed class KaraokeView : FrameworkElement
             return;
         }
 
-        // The outgoing line slides up and fades; the new one rises into place.
         double slide = (1 - p) * LineH(MainSize) * 0.6;
         if (p < 1 && _fromIndex >= 0 && _fromIndex < _lines.Count && _fromIndex != idx)
         {
@@ -457,7 +571,8 @@ public sealed class KaraokeView : FrameworkElement
             double leave = Math.Clamp(p / 0.45, 0, 1);
             dc.PushClip(new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight)));
             dc.PushOpacity(Math.Pow(1 - leave, 2));
-            DrawBlock(dc, _lines[_fromIndex], top - leave * LineH(MainSize) * 1.2, t, 1);
+            // Drawn fully sung: an overlapping last syllable would otherwise leave mid-sweep.
+            DrawBlock(dc, _lines[_fromIndex], top - leave * LineH(MainSize) * 1.2, Math.Max(t, _lines[_fromIndex].End), 1);
             dc.Pop();
             dc.Pop();
         }
@@ -468,7 +583,6 @@ public sealed class KaraokeView : FrameworkElement
         if (!_synced) DrawPlain(dc, "Unsynced lyrics", TransSize * 0.85, ActualHeight - LineH(TransSize), Style.Sub, 0.55);
     }
 
-    /// <summary>The current line, what goes under it and its backing vocals. Returns its height.</summary>
     double DrawBlock(DrawingContext dc, DisplayLine line, double y, long t, double opacity)
     {
         double used = DrawSwept(dc, line.Main, MainSize, y, t, line.Align, Style.Unsung, Style.Sung, opacity, _synced);
@@ -481,14 +595,10 @@ public sealed class KaraokeView : FrameworkElement
         return used;
     }
 
-    /// <summary>v1's strip. The line being sung sits at the top and the next waits straight under it;
-    /// when the line changes, the next one rises into the top slot and grows to full size while the
-    /// one after it fades up underneath.</summary>
     void RenderClassic(DrawingContext dc, double top, long t, int idx, double p)
     {
         var cur = _lines[idx];
         var next = idx + 1 < _lines.Count ? _lines[idx + 1] : null;
-        // Where the next line goes: under the current line's rows (one or two) and its romanization.
         double CurHeight(DisplayLine l)
         {
             double h = Layout(l.Main, MainSize, ActualWidth - 32).Length > 1 ? LineH(MainSize) * 2 : LineH(MainSize);
@@ -501,17 +611,17 @@ public sealed class KaraokeView : FrameworkElement
 
         if (p < 1 && _fromIndex >= 0 && _fromIndex < _lines.Count && _fromIndex == idx - 1)
         {
-            // The old line leaves upward and fades.
             double leave = Math.Clamp(p / 0.5, 0, 1);
             dc.PushOpacity(Math.Pow(1 - leave, 2));
-            DrawBlock(dc, _lines[_fromIndex], top - leave * LineH(MainSize) * 0.8, t, 1);
+            DrawBlock(dc, _lines[_fromIndex], top - leave * LineH(MainSize) * 0.8, Math.Max(t, _lines[_fromIndex].End), 1);
             dc.Pop();
-            // The new line rises from where it waited and grows from the next line's size to full.
             double fromY = top + CurHeight(_lines[_fromIndex]) + 2;
             double y = fromY + (top - fromY) * p;
             double s = NextSize / MainSize + (1 - NextSize / MainSize) * p;
             double cx = ActualWidth / 2;
-            dc.PushTransform(new ScaleTransform(s, s, cx, y));
+            var scale = new ScaleTransform(s, s, cx, y);
+            scale.Freeze();
+            dc.PushTransform(scale);
             DrawBlock(dc, cur, y, t, 1);
             dc.Pop();
             if (Style.ShowNext && next != null)

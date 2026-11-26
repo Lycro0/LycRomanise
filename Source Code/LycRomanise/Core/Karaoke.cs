@@ -3,12 +3,9 @@ using System.Text;
 
 namespace LycRomanise.Core;
 
-/// <summary>Helpers shared by the sources: estimating word times inside a line, unspaced scripts, and
-/// the name matching the catalog sources do.</summary>
 public static class Karaoke
 {
-    /// <summary>True when text is in a script written without spaces (CJK, kana, Thai), so each
-    /// timed syllable stands as a word of its own.</summary>
+    // CJK, kana and Thai: each timed syllable stands as a word of its own.
     public static bool UnspacedScript(string text)
     {
         foreach (var ch in text)
@@ -21,8 +18,7 @@ public static class Karaoke
         return false;
     }
 
-    /// <summary>Lines timed only by their starts: each runs to the next start, and the words inside
-    /// are spread across it by length so the sweep still moves. An empty text is a break.</summary>
+    // Line-synced sources: words are spread across the line by length so the sweep still moves.
     public static List<LyricLine> EstimatedLines(IReadOnlyList<long> starts, IReadOnlyList<string> texts)
     {
         var lines = new List<LyricLine>();
@@ -31,7 +27,9 @@ public static class Karaoke
             var text = texts[i].Trim();
             if (text.Length == 0 || text == "♪") continue;
             long start = starts[i];
-            long end = i + 1 < starts.Count ? starts[i + 1] : start + 5000;
+            // The next later start: a row sharing this stamp (original + translation) is not an end.
+            long end = start + 5000;
+            for (int j = i + 1; j < starts.Count; j++) if (starts[j] > start) { end = starts[j]; break; }
             if (end <= start) end = start + Math.Max(1500, text.Length * 120);
             // A line is sung over at most about 400 ms a character; a long gap after it is a pause.
             end = Math.Min(end, start + Math.Max(2500, text.Length * 400L));
@@ -58,7 +56,6 @@ public static class Karaoke
         return line;
     }
 
-    /// <summary>Words of a spaced script, or single characters of an unspaced one.</summary>
     static List<(string text, bool joined)> SplitPieces(string text)
     {
         var result = new List<(string, bool)>();
@@ -101,8 +98,7 @@ public static class Karaoke
         return lines.Any(l => !l.Estimated) ? Timing.Word : Timing.Line;
     }
 
-    /// <summary>A pronunciation of a line: timed words where the source has them, else plain text
-    /// estimated across the line's own time; null when it reads the same as the line.</summary>
+    // Null when the pronunciation reads the same as the line.
     public static LyricLine? Pronunciation(List<LyricWord>? words, string? plain, LyricLine of)
     {
         if (words is { Count: > 0 })
@@ -116,7 +112,6 @@ public static class Karaoke
         return est;
     }
 
-    /// <summary>Letters and digits alone, lowercased.</summary>
     public static string BareText(string? text)
     {
         if (string.IsNullOrEmpty(text)) return "";
@@ -128,7 +123,6 @@ public static class Karaoke
 
 public static class Normalize
 {
-    /// <summary>A title as the catalogs are matched by: lowercased, no spaces, punctuation or symbols.</summary>
     public static string MatchKey(string? text)
     {
         if (string.IsNullOrEmpty(text)) return "";
@@ -143,12 +137,11 @@ public static class Normalize
         return sb.ToString();
     }
 
-    /// <summary>The artist without whoever is featured ("A feat. B" is A; "A, B" is A).</summary>
     public static string LeadArtist(string? artist)
     {
         if (string.IsNullOrEmpty(artist)) return "";
         var a = artist;
-        foreach (var sep in new[] { " feat", " ft.", " featuring", " with ", " & ", ", ", " x ", ";", " / " })
+        foreach (var sep in new[] { " feat", " ft.", " featuring", " with ", " & ", ", ", " x ", ";", " / ", "、" })
         {
             int i = a.IndexOf(sep, StringComparison.OrdinalIgnoreCase);
             if (i > 0) a = a[..i];
@@ -160,13 +153,26 @@ public static class Normalize
     {
         string name = MatchKey(credited), lead = MatchKey(LeadArtist(artist));
         if (name.Length == 0 || lead.Length == 0) return false;
+        if (name == MatchKey(artist)) return true;
+        if (OneArtist(name, lead)) return true;
+        // Credit list: any one name will do. The whole string goes first so "AC/DC" still matches.
+        foreach (var part in System.Text.RegularExpressions.Regex.Split(credited!,
+            @"、|，|,|;|&|/|\s+(?:feat\.?|ft\.|featuring|with|x)\s+", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        {
+            var p = MatchKey(part);
+            if (p.Length > 0 && p != name && OneArtist(p, lead)) return true;
+        }
+        return false;
+    }
+
+    static bool OneArtist(string name, string lead)
+    {
         // Short names ("V", "IU", "I") must match exactly, or "V" would match every artist with a v in it.
         if (Math.Min(name.Length, lead.Length) < 3) return name == lead;
         return name.Contains(lead) || lead.Contains(name);
     }
 
-    /// <summary>Is a catalog's title the same song as ours? Equal once cleaned, or one is the other plus a
-    /// suffix ("YOLO" and "YOLO (Japanese ver.)" are not the same, but "Song" and "Song - 2011 Remaster" are).</summary>
+    // "Song - 2011 Remaster" matches "Song"; "YOLO (Japanese ver.)" does not match "YOLO".
     public static bool SameTitle(string? found, string? wanted)
     {
         string a = MatchKey(CleanTitle(found ?? "")), b = MatchKey(CleanTitle(wanted ?? ""));
@@ -174,7 +180,6 @@ public static class Normalize
         return a == b;
     }
 
-    /// <summary>The title without " - Remastered 2011", "(feat. X)" and the like, for name searches.</summary>
     public static string CleanTitle(string title)
     {
         var t = System.Text.RegularExpressions.Regex.Replace(title,

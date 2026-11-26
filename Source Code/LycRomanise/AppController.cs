@@ -9,7 +9,6 @@ using LycRomanise.Web;
 
 namespace LycRomanise;
 
-/// <summary>Ties it together: what is playing, the lyrics for it, and every place they are shown.</summary>
 public sealed class AppController : IDisposable
 {
     public AppSettings Settings { get; private set; }
@@ -20,9 +19,8 @@ public sealed class AppController : IDisposable
     public WebServer Web { get; }
     public bool CreditRequired { get; private set; }
     public SpotifyClient Spotify { get; }
-    /// <summary>The cover of what is playing: Spotify's 640 px image when logged in, else the player's thumbnail.</summary>
+    // Spotify's 640 px image when logged in, else the player's thumbnail.
     public System.Windows.Media.Imaging.BitmapSource? Cover { get; private set; }
-    /// <summary>The cover's image bytes, for the web view.</summary>
     public byte[]? CoverBytes { get; private set; }
     public int CoverVersion { get; private set; }
     public event Action? LyricsChanged;
@@ -45,6 +43,15 @@ public sealed class AppController : IDisposable
     CancellationTokenSource? _prefetch;
     string? _prefetchedId;
     string _nowPlayingText = "";
+    DispatcherTimer? _relookTimer;
+    long _relookDur;
+    bool _loaded;          // the current query's lookup has been shown at least once
+    int _showGen;          // the newest ShowResultAsync wins
+    Task<string?>? _installing;
+    AppSettings? _demoOriginal;
+    static string _hotkeysWarned = "";
+    // Virtual-key codes Windows refused because another app owns them.
+    public IReadOnlyCollection<uint> FailedHotkeys => (IReadOnlyCollection<uint>?)_hotkeys?.Failed ?? Array.Empty<uint>();
 
     public AppController()
     {
@@ -55,6 +62,10 @@ public sealed class AppController : IDisposable
         Web = new WebServer(this);
         Spotify = new SpotifyClient(() => Settings, SaveSettings);
     }
+
+    // Made by App right after taking the single-instance lock, so a launch during start-up is not lost. Null: Listen makes its own.
+    public EventWaitHandle? IpcSettingsHandle { get; set; }
+    public EventWaitHandle? IpcLyricsHandle { get; set; }
 
     public void Start(bool openSettings)
     {
@@ -69,16 +80,15 @@ public sealed class AppController : IDisposable
         Media.Changed += s => _ui.BeginInvoke(() => OnMedia(s));
         _ = Media.StartAsync();
         if (Settings.WebEnabled) Web.Start(Settings.WebPort);
-        IpcSignal.Listen(() => _ui.BeginInvoke(ShowSettings));
-        IpcSignal.Listen(() => _ui.BeginInvoke(ShowLyricsWindow), IpcSignal.Lyrics);
-        // Windows' own Run entry is the truth (the installer may have set it), not the saved setting.
-        // The registry is the truth for "Start with Windows", except right after the default setup changed it.
+        IpcSignal.Listen(() => _ui.BeginInvoke(ShowSettings), IpcSignal.Settings, IpcSettingsHandle);
+        IpcSignal.Listen(() => _ui.BeginInvoke(ShowLyricsWindow), IpcSignal.Lyrics, IpcLyricsHandle);
+        Updater.CleanUp();
+        // The Run entry is the truth (the installer may have set it), except right after the default setup turned it on.
         if (Settings.StartWithWindows && !Autostart.IsOn()) Autostart.Apply(true);
         Settings.StartWithWindows = Autostart.IsOn();
         if (openSettings) ShowSettings();
         if (Spotify.LoggedIn) _ = Spotify.LoadProfileAsync(CancellationToken.None);
         ApplyHotkeys();
-        // A first look for updates shortly after starting, then every six hours.
         _updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
         _updateTimer.Tick += (_, _) => { _updateTimer.Interval = TimeSpan.FromHours(6); _ = CheckForUpdateAsync(false); };
         _updateTimer.Start();
@@ -95,9 +105,14 @@ public sealed class AppController : IDisposable
         _hotkeys.Register(0x25 /* Left */, () => NudgeOffset(250));
         _hotkeys.Register(0x27 /* Right */, () => NudgeOffset(-250));
         _hotkeys.Register(0x20 /* Space */, () => _ = Media.TogglePlayAsync());
+        // Told once per set of refused keys, not on every start (the conflict is usually permanent); Settings marks them.
+        var failed = string.Join(",", _hotkeys.Failed.OrderBy(v => v));
+        if (failed.Length > 0 && failed != _hotkeysWarned)
+            Tray?.Toast("Some shortcuts are used by another app and will not work. Settings, General shows which.");
+        _hotkeysWarned = failed;
     }
 
-    /// <summary>Looks for a newer release on GitHub. manual: say so even when there is none.</summary>
+    // manual: say so even when there is no update.
     public async Task CheckForUpdateAsync(bool manual)
     {
         if (!manual && !Settings.CheckUpdates) return;
@@ -109,19 +124,27 @@ public sealed class AppController : IDisposable
         Tray?.Toast($"LycRomanise {info.Tag} is available. Open the tray menu or Settings → General to update.");
     }
 
-    public async Task<string?> InstallUpdateAsync(IProgress<double>? progress)
+    public Task<string?> InstallUpdateAsync(IProgress<double>? progress)
     {
-        if (Update == null) return "No update to install.";
-        var err = await Updater.InstallAsync(Update, progress, CancellationToken.None);
-        if (err == null) Quit();
-        return err;
+        // One install at a time: a second click (the tray and Settings both offer it) joins the running one.
+        if (_installing is { IsCompleted: false }) return _installing;
+        return _installing = Run();
+        async Task<string?> Run()
+        {
+            if (Update == null) return "No update to install.";
+            var err = await Updater.InstallAsync(Update, progress, CancellationToken.None);
+            if (err == null) Quit();
+            return err;   // a finished task with an error lets the next click try again
+        }
     }
 
-    /// <summary>For recording previews: shows each look preset in turn for `seconds`, without saving
-    /// anything, then puts the user's own look back. Started with --demo-looks.</summary>
+    // --demo-looks, for recording previews: each look preset in turn, nothing saved, then the user's own look back.
     public async Task DemoLooksAsync(double seconds)
     {
         var original = Settings;
+        _demoOriginal = original;
+        try
+        {
         foreach (var preset in LookPresets.All)
         {
             var look = original.Copy();
@@ -132,11 +155,23 @@ public sealed class AppController : IDisposable
             Reprepare();
             Log.Info($"demo: {preset.Name}");
             await Task.Delay(TimeSpan.FromSeconds(seconds));
+            if (_demoOriginal == null) return;   // a real settings change ended the demo
         }
-        Settings = original;
-        Overlay.ApplySettings(original);
-        Reprepare();
-        Log.Info("demo: done");
+        }
+        finally
+        {
+            // Saves during the demo went into the user's own settings (see SaveSettings), never the demo look.
+            if (_demoOriginal != null)
+            {
+                Settings = _demoOriginal;
+                _demoOriginal = null;
+                Settings.Save();
+                Overlay.ApplySettings(Settings);
+                Overlay.ApplyLock();
+                Reprepare();
+            }
+            Log.Info("demo: done");
+        }
     }
 
     public void ToggleLyricsWindow()
@@ -145,15 +180,18 @@ public sealed class AppController : IDisposable
         else ShowLyricsWindow();
     }
 
-    // ------------------------------------------------------------------ clock
-    /// <summary>Where the song is, shifted by the offsets (positive shows lyrics earlier).</summary>
+    // Shifted by the offsets: positive shows lyrics earlier.
     public long Clock()
     {
         var m = Media.Current;
-        if (m == null) return 0;
+        if (m == null) { _smoother.Reset(); return 0; }
         int song = _query != null && Settings.SongOffsets.TryGetValue(_query.Key, out var o) ? o : 0;
-        return m.PositionNow() + Settings.GlobalOffsetMs + song;
+        return SmoothPosition(m) + Settings.GlobalOffsetMs + song;
     }
+
+    readonly Media.ClockSmoother _smoother = new();
+
+    long SmoothPosition(MediaState m) => _smoother.Next(m.PositionNow(), DateTime.UtcNow, m.Playing, m.Rate, m.TrackKey);
 
     public int SongOffset => _query != null && Settings.SongOffsets.TryGetValue(_query.Key, out var o) ? o : 0;
 
@@ -167,7 +205,6 @@ public sealed class AppController : IDisposable
         _settingsWindow?.RefreshSongInfo();
     }
 
-    // ------------------------------------------------------------------ media
     public MediaState? NowPlaying => Media.Current;
     public TrackQuery? CurrentQuery => _query;
     public LyricsResult? CurrentResult => _result;
@@ -177,17 +214,21 @@ public sealed class AppController : IDisposable
     {
         bool hasSong = s != null && !MediaWatcher.IsAdOrDj(s);
         var key = hasSong ? s!.TrackKey : null;
-        // Same song, but its real length only arrived now (the player sent the title first): the lookup used the
-        // last song's length and may have found nothing or the wrong lyrics, so look again with the right one.
+        // Same song, but its real length only arrived now, so the lookup used the last song's length: look again.
+        // Spotify sends the NEXT song's length just before its title at every change, so wait until the length holds.
         if (hasSong && key == _trackKey && _query != null && s!.DurationMs > 0 && _relooks < 3
             && Math.Abs((int)Math.Round(s.DurationMs / 1000.0) - _query.Seconds) > 2)
         {
-            _relooks++;
-            Log.Info($"length changed for {s.Title} ({_query.Seconds}s -> {s.DurationMs / 1000}s): looking again");
-            BeginTrack(s);
+            if (_relookTimer == null || Math.Abs(_relookDur - s.DurationMs) > 1500)
+            {
+                _relookDur = s.DurationMs;
+                _relookTimer?.Stop();
+                _relookTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(1500), DispatcherPriority.Normal, (_, _) => RelookIfStill(), _ui);
+            }
         }
         if (key != _trackKey)
         {
+            StopRelook();
             _relooks = 0;
             _trackKey = key;
             if (hasSong) BeginTrack(s!);
@@ -199,8 +240,24 @@ public sealed class AppController : IDisposable
         Web.Notify();
     }
 
+    void StopRelook() { _relookTimer?.Stop(); _relookTimer = null; }
+
+    void RelookIfStill()
+    {
+        StopRelook();
+        var m = Media.Current;
+        if (m == null || MediaWatcher.IsAdOrDj(m) || m.TrackKey != _trackKey || _query == null || _relooks >= 3) return;
+        if (Math.Abs(m.DurationMs - _relookDur) > 1500) return;   // length still moving
+        if (Math.Abs((int)Math.Round(m.DurationMs / 1000.0) - _query.Seconds) <= 2) return;   // a Spotify match already fixed it
+        _relooks++;
+        Log.Info($"length changed for {m.Title} ({_query.Seconds}s -> {m.DurationMs / 1000}s): looking again");
+        BeginTrack(m);
+    }
+
     void ClearTrack()
     {
+        StopRelook();
+        _picker?.Close();
         _fetch?.Cancel();
         _query = null;
         _result = null;
@@ -210,6 +267,10 @@ public sealed class AppController : IDisposable
         Overlay.SetCredit(null);
         WriteNowPlaying("");
         Cover = null;
+        CoverBytes = null;
+        CoverVersion++;
+        _loaded = false;
+        Web.Notify(lyricsChanged: true);   // the web page must not keep the last song's lyrics and cover
         TrackChanged?.Invoke();
         LyricsChanged?.Invoke();
     }
@@ -233,13 +294,18 @@ public sealed class AppController : IDisposable
         WriteNowPlaying(NowPlayingTextFor(s));
         _settingsWindow?.RefreshSongInfo();
         Cover = null;
+        CoverBytes = null;
+        CoverVersion++;
+        _loaded = false;
+        if (_picker != null && _picker.Query.Key != _query.Key) _picker.Close();   // it was opened for the last song
+        Web.Notify(lyricsChanged: true);   // the web page must not keep the last song's lyrics and cover
         TrackChanged?.Invoke();
         LyricsChanged?.Invoke();
         _ = LoadCoverAsync(_query, null, ct);
         _ = LoadAsync(_query, ct, useCache: true);
     }
 
-    /// <summary>The player's own thumbnail first, as it is there at once; Spotify's larger cover replaces it.</summary>
+    // The player's thumbnail first, as it is there at once; Spotify's larger cover replaces it.
     async Task LoadCoverAsync(TrackQuery q, string? url, CancellationToken ct)
     {
         try
@@ -272,8 +338,7 @@ public sealed class AppController : IDisposable
         catch (Exception ex) { Log.Error("cover", ex); }
     }
 
-    /// <summary>With a Spotify login, the exact track: its id and ISRC for the sources that look up by
-    /// them, and the large cover. Only taken when Spotify is playing the same song the player reports.</summary>
+    // Spotify's id, ISRC and cover, taken only when Spotify is playing the same song the player reports.
     async Task MatchSpotifyAsync(TrackQuery q, CancellationToken ct)
     {
         if (!Spotify.LoggedIn) return;
@@ -298,7 +363,6 @@ public sealed class AppController : IDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
     }
 
-    /// <summary>Looks up the lyrics of the next song in the Spotify queue, so they are there the moment it starts.</summary>
     async Task PrefetchNextAsync()
     {
         if (!Spotify.LoggedIn || !Settings.PrefetchNext) return;
@@ -311,10 +375,10 @@ public sealed class AppController : IDisposable
             var queue = await Spotify.QueueAsync(ct);
             var next = queue.FirstOrDefault();
             if (next == null || next.Id == _prefetchedId || next.Id == _query?.SpotifyId) return;
-            _prefetchedId = next.Id;
             var q = next.ToQuery();
             Log.Info($"prefetch: {q.Artist} - {q.Title}");
             await Task.Run(() => Chain.FetchAsync(q, null, ct, useCache: true), ct);
+            _prefetchedId = next.Id;   // only once really fetched: a cancelled prefetch is tried again
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log.Error("prefetch", ex); }
@@ -324,8 +388,7 @@ public sealed class AppController : IDisposable
     {
         try
         {
-            // Players can send the new title before the new length (a quick skip back): give it a moment to settle,
-            // then take the length as it is now.
+            // Players can send the new title before the new length (a quick skip back): let it settle.
             await Task.Delay(350, ct);
             if (Media.Current is { DurationMs: > 0 } settled && settled.TrackKey == _trackKey) q.Seconds = (int)Math.Round(settled.DurationMs / 1000.0);
             // Spotify reports the length a moment after the title; wait briefly for it.
@@ -343,8 +406,9 @@ public sealed class AppController : IDisposable
         catch (Exception ex) { Log.Error("load", ex); }
     }
 
-    async Task ShowResultAsync(TrackQuery q, LyricsResult? result, CancellationToken ct)
+    async Task ShowResultAsync(TrackQuery q, LyricsResult? result, CancellationToken ct, bool prefetch = true)
     {
+        int gen = ++_showGen;
         var settings = Settings;
         List<DisplayLine> display = new();
         if (result is { HasLines: true })
@@ -362,8 +426,15 @@ public sealed class AppController : IDisposable
                 catch (Exception ex) { Log.Error("translations", ex); }
             }
             display = await Task.Run(() => Prepare(result, settings), ct);
+            // A display change while this was being prepared: prepare again with the newest settings.
+            while (!ReferenceEquals(settings, Settings) && !ct.IsCancellationRequested && gen == _showGen)
+            {
+                var s2 = settings = Settings;
+                display = await Task.Run(() => Prepare(result, s2), ct);
+            }
         }
-        if (ct.IsCancellationRequested || q != _query) return;
+        if (ct.IsCancellationRequested || q != _query || gen != _showGen) return;   // a newer call has the say
+        _loaded = true;
         _result = result;
         _display = display;
         CreditRequired = result?.CreditRequired == true;
@@ -377,10 +448,9 @@ public sealed class AppController : IDisposable
         Web.Notify(lyricsChanged: true);
         _settingsWindow?.RefreshSongInfo();
         LyricsChanged?.Invoke();
-        _ = PrefetchNextAsync();
+        if (prefetch) _ = PrefetchNextAsync();
     }
 
-    /// <summary>Romanizes the lines and sets out what each one shows, by the display mode.</summary>
     internal static List<DisplayLine> Prepare(LyricsResult r, AppSettings s)
     {
         // Readings written into the lyric ("天使（てんし）") also come from the cache and from imported files.
@@ -390,9 +460,8 @@ public sealed class AppController : IDisposable
         foreach (var line in r.Lines)
         {
             LyricLine? roman = null, backingRoman = null;
-            // Korean: our own romanization follows the sound changes; Apple's splits every syllable ("i yu").
-            // And a source's romanization that runs a long line together with no spaces is no help either.
-            // Nor one that left kanji or kana in place ("悲shimanai明日o願ukedo").
+            // Own romanization for Korean (Apple's splits every syllable, "i yu"), and over a source's that runs
+            // a long line together without spaces or leaves kanji or kana in ("悲shimanai明日o願ukedo").
             bool own = script == "ko" || (line.Pronunciation is { } pr && ((pr.Text.Length > 14 && !pr.Text.Contains(' ')) || Romanizer.Needs(pr.Text)));
             if (s.Display != DisplayMode.OriginalOnly && Romanizer.Needs(line.Text))
                 roman = (own ? null : line.Pronunciation) ?? Romanizer.ForLine(line, script);
@@ -411,13 +480,13 @@ public sealed class AppController : IDisposable
         return list;
     }
 
-    /// <summary>Re-prepares the lines already fetched, after a display setting changed.</summary>
     public void Reprepare()
     {
-        if (_query == null) return;
+        // Nothing shown yet: the lookup in flight reads the new settings itself when it finishes.
+        if (_query == null || !_loaded) return;
         var q = _query;
         var ct = _fetch?.Token ?? CancellationToken.None;
-        _ = ShowResultAsync(q, _result, ct);
+        _ = ShowResultAsync(q, _result, ct, prefetch: false);
     }
 
     public void Refetch(bool skipCache)
@@ -429,19 +498,22 @@ public sealed class AppController : IDisposable
         _ = LoadAsync(_query, _fetch.Token, useCache: !skipCache);
     }
 
-    public void UseResult(LyricsResult r, bool rememberForSong)
+    public void UseResult(LyricsResult r, bool rememberForSong) { if (_query != null) UseResult(_query, r, rememberForSong); }
+
+    public void UseResult(TrackQuery forQuery, LyricsResult r, bool rememberForSong)
     {
-        if (_query == null) return;
+        // By key, not reference: a length re-look gives the same song a new query object.
+        var cur = _query;
+        if (cur == null || cur.Key != forQuery.Key) { Tray?.Toast("The song changed, so those lyrics were not applied."); return; }
         if (rememberForSong)
         {
-            Settings.SongSourceOverride[_query.Key] = r.SourceKey;
+            Settings.SongSourceOverride[cur.Key] = r.SourceKey;
             SaveSettings();
         }
-        Chain.Remember(_query, r);
-        _ = ShowResultAsync(_query, r, _fetch?.Token ?? CancellationToken.None);
+        Chain.Remember(cur, r);
+        _ = ShowResultAsync(cur, r, _fetch?.Token ?? CancellationToken.None, prefetch: false);
     }
 
-    // ------------------------------------------------------------------ visibility
     void UpdateVisibility()
     {
         var m = Media.Current;
@@ -457,8 +529,29 @@ public sealed class AppController : IDisposable
         Overlay.Karaoke.SetAnimating(show && (playing || previewing));
     }
 
-    // ------------------------------------------------------------------ settings
-    public void SaveSettings() => Settings.Save();
+    public void SaveSettings()
+    {
+        // During --demo-looks Settings is a demo copy: carry live edits over to the user's own settings instead.
+        if (_demoOriginal is { } o && !ReferenceEquals(o, Settings))
+        {
+            var d = Settings;
+            o.Left = d.Left; o.Top = d.Top;
+            o.SongOffsets = d.SongOffsets; o.SongSourceOverride = d.SongSourceOverride;
+            o.LyricsAlwaysOnTop = d.LyricsAlwaysOnTop; o.LyricsPanelHidden = d.LyricsPanelHidden;
+            o.LyricsFontSize = d.LyricsFontSize; o.LyricsLeft = d.LyricsLeft; o.LyricsTop = d.LyricsTop;
+            o.LyricsWidth = d.LyricsWidth; o.LyricsHeight = d.LyricsHeight; o.LyricsMaximized = d.LyricsMaximized;
+            o.SkippedVersion = d.SkippedVersion; o.SpotifyRefreshProtected = d.SpotifyRefreshProtected;
+            o.Save();
+            return;
+        }
+        Settings.Save();
+    }
+
+    // Saves what is otherwise only saved on close.
+    public void FlushForSessionEnd()
+    {
+        try { _lyricsWindow?.SaveBounds(); SaveSettings(); } catch (Exception ex) { Log.Error("session end", ex); }
+    }
 
     public void ApplySettings(AppSettings updated, bool lyricsAffected, bool fromSettingsWindow = false)
     {
@@ -469,7 +562,7 @@ public sealed class AppController : IDisposable
         bool themeChanged = updated.Theme != Settings.Theme;
         bool autostartChanged = updated.StartWithWindows != Settings.StartWithWindows;
         bool hotkeysChanged = updated.GlobalHotkeys != Settings.GlobalHotkeys;
-        // Keep the strip's live position and lock, which the strip itself changes.
+        // Values the strip and the lyrics window change themselves: keep the live ones.
         updated.Left = Settings.Left;
         updated.Top = Settings.Top;
         updated.Locked = Settings.Locked;
@@ -481,6 +574,9 @@ public sealed class AppController : IDisposable
         updated.LyricsLeft = Settings.LyricsLeft; updated.LyricsTop = Settings.LyricsTop;
         updated.LyricsWidth = Settings.LyricsWidth; updated.LyricsHeight = Settings.LyricsHeight;
         updated.LyricsMaximized = Settings.LyricsMaximized;
+        updated.LyricsPanelHidden = Settings.LyricsPanelHidden;
+        updated.SkippedVersion = Settings.SkippedVersion;
+        if (_demoOriginal != null) { updated.Locked = _demoOriginal.Locked; _demoOriginal = null; }   // a real change ends the demo
         Settings = updated;
         SaveSettings();
         if (themeChanged) { Theme.Apply(Settings.Theme); if (_settingsWindow != null) Theme.Paint(_settingsWindow); }
@@ -536,14 +632,15 @@ public sealed class AppController : IDisposable
             _lyricsWindow = new LyricsWindow(this);
             _lyricsWindow.Closed += (_, _) => { _lyricsWindow = null; UpdateVisibility(); };
             _lyricsWindow.StateChanged += (_, _) => UpdateVisibility();
+            // Maximized from the start, so it never paints at normal size first and lays out twice.
+            if (Settings.LyricsMaximized) _lyricsWindow.WindowState = WindowState.Maximized;
             _lyricsWindow.Show();
             UpdateVisibility();
-            OverlayWindow.ShowWindow(new System.Windows.Interop.WindowInteropHelper(_lyricsWindow).Handle, Settings.LyricsMaximized ? 3 : 9);
         }
         _lyricsWindow.Activate();
     }
 
-    /// <summary>Jumps the song to where a lyric line starts (the offsets taken back out).</summary>
+    // The offsets are taken back out.
     public void SeekToLyric(long lyricMs)
     {
         long target = lyricMs - Settings.GlobalOffsetMs - SongOffset;
@@ -553,13 +650,13 @@ public sealed class AppController : IDisposable
     public void ShowPicker()
     {
         if (_query == null) { Tray?.Toast("Play a song first"); return; }
+        if (_picker != null && _picker.Query.Key != _query.Key) _picker.Close();   // opened for another song
         if (_picker != null) { _picker.Activate(); return; }
         _picker = new PickerWindow(this, _query);
         _picker.Closed += (_, _) => _picker = null;
         _picker.Show();
     }
 
-    // ------------------------------------------------------------------ OBS text file
     string _nowPlayingWanted = "";
     System.Windows.Threading.DispatcherTimer? _nowPlayingRetry;
 
@@ -570,8 +667,7 @@ public sealed class AppController : IDisposable
         _ => s.Artist.Length > 0 ? $"{s.Artist} - {s.Title}" : s.Title,
     };
 
-    /// <summary>Keeps LycRomanise.txt in step with what is playing. Written whole and swapped in, so OBS
-    /// never reads half a file; if OBS has it locked, tried again until it goes through.</summary>
+    // LycRomanise.txt for OBS: written whole and swapped in so OBS never reads half a file; retried while OBS has it locked.
     void WriteNowPlaying(string text)
     {
         if (!Settings.NowPlayingFile) return;
@@ -596,7 +692,7 @@ public sealed class AppController : IDisposable
 
     public void Quit()
     {
-        Settings.Save();
+        (_demoOriginal ?? Settings).Save();
         Application.Current.Shutdown();
     }
 

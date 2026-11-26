@@ -75,6 +75,7 @@ static class SelfTestApp
 
             var steps = new (string, Func<Task>)[] { ("visibility", Visibility), ("songs", SongStorm), ("title file", TitleFile), ("web", Web), ("settings", SettingsWindowEverywhere), ("lyrics window", LyricsWindowEverywhere) };
             if (Environment.GetEnvironmentVariable("LYC_QUICK") == "1") steps = new (string, Func<Task>)[] { ("settings", SettingsWindowEverywhere) };
+            if (Environment.GetEnvironmentVariable("LYC_STEPS") is { Length: > 0 } only) steps = steps.Where(st => only.Split(',').Contains(st.Item1)).ToArray();
             if (Environment.GetEnvironmentVariable("LYC_QUICK") == "skip") steps = new (string, Func<Task>)[] { ("skip back", SkipBack) };
             else steps = steps.Append(("skip back", (Func<Task>)SkipBack)).ToArray();
             foreach (var (name, step) in steps)
@@ -315,7 +316,7 @@ static class SelfTestApp
         bool quick = Environment.GetEnvironmentVariable("LYC_QUICK") == "1";
         foreach (var page in quick ? new List<string>() : pages)
         {
-            try { Call(sw, "Show", page); await Pump(150); Check($"page {page} opens", true); }
+            try { Call(sw, "Show", page, false); await Pump(150); Check($"page {page} opens", true); }
             catch (Exception ex) { Check($"page {page} opens", false, ex.InnerException?.Message ?? ex.Message); continue; }
             // Toggles: flip each, then back. (Start with Windows and the web view are restored at the end.)
             var toggles = All<ToggleButton>(sw).Where(t => t.IsVisible && t.IsEnabled && t is not RadioButton).ToList();
@@ -351,7 +352,7 @@ static class SelfTestApp
             await Pump(200);   // let the debounced save happen
         }
         // The look gallery: every look card applies.
-        Call(sw, "Show", "look"); await Pump(200);
+        Call(sw, "Show", "look", false); await Pump(200);
         foreach (var preset in LookPresets.All)
         {
             var c = _app.Settings.Copy(); preset.Apply(c); _app.ApplySettings(c, true); await Pump(60);

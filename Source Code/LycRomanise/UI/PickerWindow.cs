@@ -5,7 +5,6 @@ using LycRomanise.Core;
 
 namespace LycRomanise.UI;
 
-/// <summary>Asks every source at once and shows what each has for the song, to pick the right one.</summary>
 public sealed class PickerWindow : Window
 {
     readonly AppController _app;
@@ -14,6 +13,7 @@ public sealed class PickerWindow : Window
     readonly TextBlock _status = new() { Opacity = 0.7, Margin = new Thickness(0, 0, 0, 12) };
     readonly CheckBox _remember = new() { Content = "Always use this source for this song", IsChecked = true, Margin = new Thickness(0, 12, 0, 0) };
     readonly CancellationTokenSource _cts = new();
+    public TrackQuery Query => _query;
 
     public PickerWindow(AppController app, TrackQuery query)
     {
@@ -71,7 +71,7 @@ public sealed class PickerWindow : Window
             text.Children.Add(new TextBlock { Text = preview, Opacity = 0.85, Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap });
             grid.Children.Add(text);
             var use = new Button { Content = "Use", Padding = new Thickness(18, 6, 18, 6), VerticalAlignment = VerticalAlignment.Top, Style = (Style)Application.Current.FindResource("AccentButtonStyle") };
-            use.Click += (_, _) => { _app.UseResult(r, _remember.IsChecked == true); Close(); };
+            use.Click += (_, _) => { _app.UseResult(_query, r, _remember.IsChecked == true); Close(); };
             Grid.SetColumn(use, 1);
             grid.Children.Add(use);
             card.Child = grid;

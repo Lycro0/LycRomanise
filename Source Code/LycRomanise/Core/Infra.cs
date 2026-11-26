@@ -10,7 +10,7 @@ public static class Paths
 {
     public static readonly string Data = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LycRomanise");
-    /// <summary>Where v2.0 to v2.1 kept everything; moved into <see cref="Data"/> on start.</summary>
+    // The v2.0 to v2.1 data folder.
     public static readonly string OldData = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LycRomanise Modern");
     public static string Settings => Path.Combine(Data, "settings.json");
@@ -50,7 +50,6 @@ public static class Paths
         foreach (var d in Directory.GetDirectories(from)) MergeInto(d, Path.Combine(to, Path.GetFileName(d)));
     }
 
-    /// <summary>A path inside the old folder, pointed at the same place in the new one.</summary>
     public static string FromOld(string path) =>
         path.StartsWith(OldData + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || path.Equals(OldData, StringComparison.OrdinalIgnoreCase)
             ? Data + path[OldData.Length..] : path;
@@ -87,7 +86,6 @@ public static class Log
     public static void Error(string where, Exception ex) => Info($"ERROR {where}: {ex.GetType().Name}: {ex.Message}");
 }
 
-/// <summary>The one HttpClient the app shares, and small JSON helpers the sources use.</summary>
 public static class Http
 {
     public const string BrowserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
@@ -140,6 +138,17 @@ public static class Http
         return await SendAsync(req, headers, ct);
     }
 
+    // Set when a request failed (network, 429, 5xx), so the resulting miss is not cached as final.
+    public static readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<bool>?> Degraded = new();
+
+    public static void MarkDegraded() { if (Degraded.Value is { } box) box.Value = true; }
+
+    static Reply Note(Reply r)
+    {
+        if (r.Status is 0 or 429 or >= 500) MarkDegraded();
+        return r;
+    }
+
     static async Task<Reply> SendAsync(HttpRequestMessage req, IDictionary<string, string>? headers, CancellationToken ct)
     {
         if (headers != null)
@@ -149,20 +158,19 @@ public static class Http
         {
             var resp = await Client.SendAsync(req, ct);
             var body = await resp.Content.ReadAsStringAsync(ct);
-            return new Reply((int)resp.StatusCode, body, resp);
+            return Note(new Reply((int)resp.StatusCode, body, resp));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             Log.Info($"http {req.RequestUri?.Host}: {ex.GetType().Name} {ex.Message}");
-            return new Reply(0, "", null);
+            return Note(new Reply(0, "", null));
         }
     }
 
     static readonly string SystemCurl = Path.Combine(Environment.SystemDirectory, "curl.exe");
 
-    /// <summary>A GET through Windows' own curl.exe, for the few sites that turn away .NET's TLS
-    /// handshake (Genius, behind Cloudflare). Falls back to HttpClient when curl is missing.</summary>
+    // Windows' curl.exe, for sites whose Cloudflare front turns away .NET's TLS handshake (Genius).
     public static async Task<Reply> CurlGetAsync(string url, string userAgent, CancellationToken ct)
     {
         if (!File.Exists(SystemCurl)) return await GetAsync(url, new Dictionary<string, string> { ["User-Agent"] = userAgent }, ct);
@@ -180,13 +188,13 @@ public static class Http
             await p.WaitForExitAsync(ct);
             int nl = output.LastIndexOf('\n');
             int status = nl >= 0 && int.TryParse(output[(nl + 1)..].Trim(), out var st) ? st : 0;
-            return new Reply(status, nl >= 0 ? output[..nl] : output, null);
+            return Note(new Reply(status, nl >= 0 ? output[..nl] : output, null));
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             Log.Info($"curl {url}: {ex.Message}");
-            return new Reply(0, "", null);
+            return Note(new Reply(0, "", null));
         }
     }
 

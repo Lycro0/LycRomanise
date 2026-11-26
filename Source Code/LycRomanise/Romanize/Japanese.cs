@@ -4,9 +4,7 @@ using Windows.Globalization;
 
 namespace LycRomanise.Romanize;
 
-/// <summary>Japanese → Hepburn romaji. Windows' own Japanese phonetic analyzer (the IME's dictionary)
-/// splits the line into words and reads the kanji in context; the kana are then written in Hepburn with
-/// the particle readings (は wa, へ e, を o), long vowels and small っ handled.</summary>
+// Windows' Japanese phonetic analyzer (the IME dictionary) splits words and reads kanji in context; kana then go to Hepburn.
 public static partial class Japanese
 {
     static readonly Dictionary<string, string> Kana = BuildKana();
@@ -39,6 +37,9 @@ public static partial class Japanese
         // Sounds katakana writes for loanwords (converted to hiragana first).
         Add("ふぁ ふぃ ふぇ ふぉ ゔぁ ゔぃ ゔぇ ゔぉ てぃ でぃ とぅ どぅ うぃ うぇ うぉ ちぇ しぇ じぇ つぁ つぃ つぇ つぉ いぇ でゅ てゅ ふゅ くぁ ぐぁ",
             "fa fi fe fo va vi ve vo ti di tu du wi we wo che she je tsa tsi tse tso ye dyu tyu fyu kwa gwa");
+        // ヷ-ヺ have no hiragana form, so ToHiragana leaves them as katakana. Small Ainu kana too.
+        Add("ヷ ヸ ヹ ヺ", "va vi ve vo");
+        Add("ㇰ ㇱ ㇲ ㇳ ㇴ ㇵ ㇶ ㇷ ㇸ ㇹ ㇺ ㇻ ㇼ ㇽ ㇾ ㇿ", "ku shi su to nu ha hi fu he ho mu ra ri ru re ro");
         return d;
     }
 
@@ -50,12 +51,41 @@ public static partial class Japanese
         return sb.ToString();
     }
 
+    // Iteration marks repeat the kana before them (ゞ/ヾ voiced). The analyzer reads a lone mark as
+    // "kurikaeshi", so expand them first. Stray combining dakuten left after NFKC are dropped.
+    static string ExpandMarks(string s)
+    {
+        if (s.IndexOfAny(['ゝ', 'ゞ', 'ヽ', 'ヾ', '゙', '゚']) < 0) return s;
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (c is '゙' or '゚') continue;
+            if (c is 'ゝ' or 'ゞ' or 'ヽ' or 'ヾ')
+            {
+                var prev = sb.Length > 0 ? sb[^1] : '\0';
+                bool kana = (prev >= 'ぁ' && prev <= 'ゖ') || (prev >= 'ァ' && prev <= 'ヺ');
+                if (!kana) continue;
+                if (c is 'ゞ' or 'ヾ')
+                {
+                    var voiced = (prev + "゙").Normalize(NormalizationForm.FormC);
+                    sb.Append(voiced.Length == 1 ? voiced[0] : prev);
+                }
+                else sb.Append(prev);
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
     public static bool IsKana(char c) => (c >= '぀' && c <= 'ヿ') || (c >= 'ㇰ' && c <= 'ㇿ') || (c >= 'ｦ' && c <= 'ﾟ');
 
-    /// <summary>Kana (hiragana or katakana) → Hepburn.</summary>
     public static string KanaToRomaji(string kana)
     {
-        var h = ToHiragana(kana.Normalize(NormalizationForm.FormKC));
+        string norm;
+        // A lone surrogate makes Normalize throw; keep the text as it is rather than lose the line.
+        try { norm = kana.Normalize(NormalizationForm.FormKC); } catch (ArgumentException) { norm = kana; }
+        var h = ToHiragana(ExpandMarks(norm));
         var sb = new StringBuilder();
         bool geminate = false;
         for (int i = 0; i < h.Length;)
@@ -64,7 +94,6 @@ public static partial class Japanese
             if (c == 'っ') { geminate = true; i++; continue; }
             if (c == 'ー')
             {
-                // A long vowel: repeat the vowel before it.
                 var last = sb.Length > 0 ? sb[^1] : '\0';
                 if ("aiueo".Contains(last)) sb.Append(last);
                 i++;
@@ -106,9 +135,7 @@ public static partial class Japanese
 
     static bool _warned;
 
-    // Windows' Japanese reader only works on a single-threaded (STA) thread; called from the thread pool it
-    // fails, and the kanji were left as they were ("夢o見ta"). Calls from other threads are run on one
-    // dedicated STA thread instead.
+    // Windows' Japanese reader fails unless called on an STA thread (kanji left unread), so other calls go to one STA thread.
     static readonly System.Collections.Concurrent.BlockingCollection<(string text, TaskCompletionSource<IReadOnlyList<JapanesePhoneme>?> done)> _work = new();
     static Thread? _sta;
 
@@ -143,12 +170,16 @@ public static partial class Japanese
 
     public static string Romanize(string text)
     {
-        text = StripFurigana(text.Normalize(NormalizationForm.FormKC));
+        text = ExpandMarks(StripFurigana(text.Normalize(NormalizationForm.FormKC)));
         var parts = new List<string>();
-        // The analyzer reads at most 100 characters at a time.
-        for (int start = 0; start < text.Length; start += 100)
+        // The analyzer reads under 100 characters at a time (exactly 100 returns no words).
+        // The advance sits in the iterator so the fallback's continue cannot skip it.
+        for (int start = 0, len = 0; start < text.Length; start += len)
         {
-            var chunk = text.Substring(start, Math.Min(100, text.Length - start));
+            len = Math.Min(99, text.Length - start);
+            // Never split a surrogate pair (emoji, Ext-B kanji such as 𠮟) across two chunks.
+            if (start + len < text.Length && char.IsHighSurrogate(text[start + len - 1])) len--;
+            var chunk = text.Substring(start, len);
             IReadOnlyList<JapanesePhoneme>? words = null;
             try { words = Analyze(chunk); }
             catch (Exception ex) { if (!_warned) { _warned = true; LycRomanise.Core.Log.Error("japanese reader", ex); } }
@@ -159,6 +190,12 @@ public static partial class Japanese
                 var display = w.DisplayText;
                 var yomi = Words.TryGetValue(display, out var forced) ? forced : w.YomiText;
                 if (string.IsNullOrWhiteSpace(display)) continue;
+                // An emoji has a reading ("niyari" for a grin) but is not lyrics text: keep it as is.
+                if (display.Any(char.IsSurrogate) && !display.EnumerateRunes().Any(Rune.IsLetterOrDigit))
+                {
+                    parts.Add(display);
+                    continue;
+                }
                 if (PunctOnly().IsMatch(display))
                 {
                     var p = string.Concat(display.Select(c => Punct.TryGetValue(c, out var m) ? m : c.ToString())).Trim();
