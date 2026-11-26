@@ -343,12 +343,12 @@ public partial class SettingsWindow : Window
         RefreshSongInfo();
 
         p.Children.Add(Group("Quick settings"));
-        p.Children.Add(Card("Lock the strip", "Locked, clicks pass straight through it. Unlock from the tray icon.", Toggle(_app.Settings.Locked, v => _app.SetLocked(v)), ""));
+        p.Children.Add(Card("Lock the strip", "Unlock from the tray icon.", Toggle(_app.Settings.Locked, v => _app.SetLocked(v)), ""));
         p.Children.Add(Card("What the strip shows", null, Combo(_s.Display, new[]
         {
             (DisplayMode.OriginalAndRomanized, "Original + romanized"), (DisplayMode.RomanizedOnly, "Romanized only"), (DisplayMode.OriginalOnly, "Original only"),
         }, v => _s.Display = v, true), ""));
-        p.Children.Add(Card("Show translation", "Under each line, from the lyrics source or Musixmatch's community.", Toggle(_s.ShowTranslation, v => _s.ShowTranslation = v, true), ""));
+        p.Children.Add(Card("Show translation", null, Toggle(_s.ShowTranslation, v => _s.ShowTranslation = v, true), ""));
         return p;
     }
 
@@ -474,8 +474,8 @@ public partial class SettingsWindow : Window
         p.Children.Add(Card("Size", null, SliderBox(_s.FontSize, 16, 96, 1, "{0:0} px", v => _s.FontSize = v), ""));
         p.Children.Add(Card("Bold", null, Toggle(_s.Bold, v => _s.Bold = v), ""));
         p.Children.Add(Card("Outline width", null, SliderBox(_s.OutlineWidth, 0, 8, 0.5, "{0:0.0} px", v => _s.OutlineWidth = v), ""));
-        p.Children.Add(Card("Glow", "A soft shadow that keeps text readable on any background.", Toggle(_s.Glow, v => _s.Glow = v), ""));
-        p.Children.Add(Card("Smooth sweep", "A soft edge on the karaoke colour as it moves.", Toggle(_s.SmoothSweep, v => _s.SmoothSweep = v), ""));
+        p.Children.Add(Card("Glow", null, Toggle(_s.Glow, v => _s.Glow = v), ""));
+        p.Children.Add(Card("Smooth sweep", null, Toggle(_s.SmoothSweep, v => _s.SmoothSweep = v), ""));
 
         p.Children.Add(Group("Background"));
         p.Children.Add(Card("Background colour", null, ColorBox(_s.BackgroundColor, v => _s.BackgroundColor = v), ""));
@@ -501,7 +501,7 @@ public partial class SettingsWindow : Window
         }, v => _s.TranslationLanguage = v, true), ""));
         p.Children.Add(Card("Backing vocals", "The (oh, yeah) sung under a line, where the source has them.", Toggle(_s.ShowBackingVocals, v => _s.ShowBackingVocals = v, true), ""));
         p.Children.Add(Card("Next line preview", null, Toggle(_s.ShowNextLine, v => _s.ShowNextLine = v), ""));
-        p.Children.Add(Card("Song title card", "Artist and song for a few seconds when a song starts.", Toggle(_s.ShowTitleCard, v => _s.ShowTitleCard = v), ""));
+        p.Children.Add(Card("Song title card", null, Toggle(_s.ShowTitleCard, v => _s.ShowTitleCard = v), ""));
         return p;
     }
 
@@ -661,8 +661,8 @@ public partial class SettingsWindow : Window
     UIElement WindowPage()
     {
         var p = PageRoot("Strip & window");
-        p.Children.Add(Card("Lock the strip", "Locked, it ignores the mouse so you can click through it.", Toggle(_app.Settings.Locked, v => _app.SetLocked(v)), ""));
-        p.Children.Add(Card("Hide the lock button", "Lock and unlock from the tray icon only.", Toggle(_s.HideLockIcon, v => _s.HideLockIcon = v), ""));
+        p.Children.Add(Card("Lock the strip", null, Toggle(_app.Settings.Locked, v => _app.SetLocked(v)), ""));
+        p.Children.Add(Card("Hide the lock button", null, Toggle(_s.HideLockIcon, v => _s.HideLockIcon = v), ""));
         p.Children.Add(Card("Width", null, SliderBox(_s.StripWidth, 400, 2400, 10, "{0:0} px", v => _s.StripWidth = v), ""));
         p.Children.Add(Card("Text alignment", null, Combo(_s.Align, new[] { (StripAlign.Center, "Centre"), (StripAlign.Left, "Left"), (StripAlign.Right, "Right") }, v => _s.Align = v), ""));
         p.Children.Add(Card("Hide while paused", null, Toggle(_s.HideWhenPaused, v => _s.HideWhenPaused = v), ""));
@@ -763,7 +763,7 @@ public partial class SettingsWindow : Window
         }
         RefreshUpdate();
         p.Children.Add(Wide(new StackPanel { Children = { new TextBlock { Text = "LycRomanise " + Updater.CurrentText, FontSize = 14 }, upStatus, bar, upButtons } }));
-        p.Children.Add(Card("Check for updates automatically", "At start-up and every six hours, from GitHub releases.", Toggle(_s.CheckUpdates, v => _s.CheckUpdates = v), "\uE895"));
+        p.Children.Add(Card("Check for updates automatically", null, Toggle(_s.CheckUpdates, v => _s.CheckUpdates = v), "\uE895"));
 
         p.Children.Add(Group("Keyboard shortcuts"));
         p.Children.Add(Card("Global shortcuts", null,Toggle(_s.GlobalHotkeys, v => _s.GlobalHotkeys = v), "\uE765"));

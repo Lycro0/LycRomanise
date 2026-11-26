@@ -161,6 +161,7 @@ public sealed class LyricsPageView : FrameworkElement
 
     public void SetLyrics(IReadOnlyList<DisplayLine> lines, bool synced, long durationMs, string? emptyMessage)
     {
+        _quietUntil = long.MinValue;
         _lines = lines.ToList();
         _synced = synced;
         _durationMs = durationMs;
@@ -210,13 +211,33 @@ public sealed class LyricsPageView : FrameworkElement
     void Later(object? s, EventArgs e) { _later!.Stop(); InvalidateVisual(); }
 
     DateTime _lastInvalidate;
-    // About 40 redraws a second: smooth for scrolling and the karaoke fill, a third less work than 60.
+    // About 30 redraws a second, the same as the strip.
     void OnFrame(object? sender, EventArgs e)
     {
         var now = DateTime.UtcNow;
-        if ((now - _lastInvalidate).TotalMilliseconds < 24) return;
+        if ((now - _lastInvalidate).TotalMilliseconds < 31) return;
+        if (_quietUntil != long.MinValue && !_settling && _clock != null)
+        {
+            long t = _clock();
+            if (t >= _quietFrom && t < _quietUntil) return;
+        }
         _lastInvalidate = now;
         InvalidateVisual();
+    }
+
+    long _quietFrom, _quietUntil = long.MinValue;
+
+    // Until when the frame just drawn stays the same: the active line is fully sung and the next one has not started.
+    long QuietUntil(long t)
+    {
+        if (!_synced || _active < 0) return long.MinValue;
+        var b = _blocks[_active];
+        if (b.Line == null) return long.MinValue;
+        long end = long.MinValue;
+        foreach (var text in new[] { b.Main, b.Sub, b.Backing })
+            if (text != null) foreach (var w in text.Words) end = Math.Max(end, w.End);
+        if (t < end + 500) return long.MinValue;
+        return _active + 1 < _blocks.Count ? (_blocks[_active + 1].Line?.Start ?? _blocks[_active + 1].BreakFrom + 400) : long.MaxValue;
     }
 
     // ------------------------------------------------------------------ layout
@@ -420,6 +441,8 @@ public sealed class LyricsPageView : FrameworkElement
         // Paused, nothing redraws on its own: run frames just until the scroll, hover fade or settling ends,
         // and come back when a scroll pause runs out so the column returns to the current line.
         if (moving != _settling) { _settling = moving; if (moving) _lastFrame = now; Hook(); }
+        _quietFrom = t;
+        _quietUntil = moving || user ? long.MinValue : QuietUntil(t);
         if (user && !_rendering) RedrawAt(_userUntil.AddMilliseconds(20));
     }
 
@@ -463,12 +486,14 @@ public sealed class LyricsPageView : FrameworkElement
     static LinearGradientBrush Edge(Rect r, double f)
     {
         double edge = Math.Min(14, r.Width * 0.4);
-        return new LinearGradientBrush
+        var g = new LinearGradientBrush
         {
             MappingMode = BrushMappingMode.Absolute,
             StartPoint = new Point(r.X + r.Width * f - edge, 0), EndPoint = new Point(r.X + r.Width * f + 0.1, 0),
             GradientStops = { new GradientStop(Colors.Black, 0), new GradientStop(Colors.Transparent, 1) },
         };
+        g.Freeze();
+        return g;
     }
 
     double DrawText(DrawingContext dc, Text text, double x, double y, bool active, long t, Brush dim, Brush bright)
@@ -574,7 +599,7 @@ public sealed class LyricsPageView : FrameworkElement
         for (int i = 0; i < 3; i++)
         {
             double fill = live ? Math.Clamp(prog * 3 - i, 0, 1) : 0;
-            var brush = new SolidColorBrush(Color.FromArgb((byte)(90 + 165 * fill), 255, 255, 255));
+            var brush = new SolidColorBrush(Color.FromArgb((byte)(90 + 165 * fill), 255, 255, 255)); brush.Freeze();
             dc.DrawEllipse(brush, null, new Point(x + r + i * r * 3.2, y + _fontSize * 0.55), r * breathe, r * breathe);
         }
     }

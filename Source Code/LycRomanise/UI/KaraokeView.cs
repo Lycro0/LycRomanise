@@ -108,11 +108,10 @@ public sealed class KaraokeView : FrameworkElement
 
     void OnFrame(object? sender, EventArgs e)
     {
-        // At most about 60 redraws a second: on a 144-165 Hz screen the sweep looks no smoother, and the
-        // transparent window costs a software render and copy per frame.
+        // About 30 redraws a second: the transparent window costs a software render and copy per frame.
         if (e is RenderingEventArgs re)
         {
-            if ((re.RenderingTime - _lastFrame).TotalMilliseconds < 15 && re.RenderingTime >= _lastFrame) return;
+            if ((re.RenderingTime - _lastFrame).TotalMilliseconds < 31 && re.RenderingTime >= _lastFrame) return;
             _lastFrame = re.RenderingTime;
         }
         // Nothing on screen changes before _quietUntil (a held, finished line, a gap between words).
